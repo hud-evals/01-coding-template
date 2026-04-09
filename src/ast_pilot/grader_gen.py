@@ -60,7 +60,7 @@ def generate_graders(
     source_ctx = _build_source_context(ev, source_paths, test_paths)
     primary_module = _primary_module_name(ev, source_ctx)
 
-    init_content = "from .task import task\n"
+    init_content = ""
     _write(paths.task_dir / "__init__.py", init_content)
     files[f"tasks/{paths.slug}/__init__.py"] = init_content
 

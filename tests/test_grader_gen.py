@@ -149,7 +149,7 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("from target import *", support_shim)
             self.assertIn("SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
             self.assertIn("pythonpath = f\"/home/ubuntu/workspace:{SUPPORT_DIR}:$PYTHONPATH\"", task_py)
-            self.assertEqual(init_py, "from .task import task\n")
+            self.assertEqual(init_py, "")
 
 
 if __name__ == "__main__":
