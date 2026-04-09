@@ -14,7 +14,7 @@ from hud.tools.coding import BashTool, EditTool
 
 logger = logging.getLogger(__name__)
 
-env = Environment("coding")
+env = Environment("mario-claire")
 
 bash_tool = BashTool()
 edit_tool = EditTool()
@@ -35,7 +35,8 @@ WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/ubuntu/workspace")
 def make_prompt(description: str) -> str:
     """Format a task description into an agent prompt."""
     return (
-        f"You are working in {WORKSPACE_DIR}.\n"
+        f"Your solution files belong in {WORKSPACE_DIR}.\n"
+        "Your shell may start in a different current directory, so create/edit files in that workspace path explicitly.\n"
         "Use bash and editor tools to complete the following task:\n\n"
         f"{description}"
     )

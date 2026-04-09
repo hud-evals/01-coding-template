@@ -17,3 +17,17 @@ uv.lock
 .mypy_cache/
 .hud/
 .hud_eval.toml
+
+# ast-pilot tool (lives in repo but not shipped to Docker)
+src/
+output/
+ast_test/
+evidence*.json
+*.lock
+HANDOFF.md
+USAGE.md
+claire-paper.pdf
+
+# Source repos used for task generation
+hermes-agent/
+NL2RepoBench/

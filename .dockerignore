@@ -13,3 +13,18 @@ dist
 build
 uv.lock
 README.md
+HANDOFF.md
+USAGE.md
+
+# ast-pilot tool — must not be in the Docker image
+src/
+output/
+ast_test/
+evidence*.json
+main.py
+claire-paper.pdf
+.python-version
+
+# Source repos — must not be in the Docker image
+hermes-agent/
+NL2RepoBench/
