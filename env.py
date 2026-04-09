@@ -14,6 +14,9 @@ from hud.tools.coding import BashTool, EditTool
 
 logger = logging.getLogger(__name__)
 
+# NOTE: `mario-claire` is the original local HUD environment name used while
+# developing this template. You MUST replace this hardcoded value before
+# reusing or shipping the repo for your own environment.
 env = Environment("mario-claire")
 
 bash_tool = BashTool()

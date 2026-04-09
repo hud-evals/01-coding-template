@@ -147,7 +147,7 @@ You still need to redeploy when you change anything that affects the environment
 
 If you only changed task metadata or prompt content, sync may be enough. If you are unsure, run both.
 
-The current template and generated tasks default to `HUD_ENV_NAME=mario-claire` unless you override it.
+The current template and generated tasks still default to `HUD_ENV_NAME=mario-claire` because that was the original local development environment name used while building this repo. That placeholder is hardcoded in `env.py`, generated `task.py`, and current build metadata, and you MUST change it for your own environment before reusing or shipping this template.
 
 For larger-scale usage patterns, see the HUD docs:
 [Running at Scale](https://docs.hud.ai/building/running-at-scale)
@@ -273,6 +273,12 @@ The simplest QA loop is:
 hud eval . claude --task-ids your-task-slug -y --max-steps 30
 ```
 
+After having successfully ran the tasks on hud, we have a beta feature that you should use called QA Agents. This is still in beta so take it with a grain of salt, but in our internal benchmarks we've seen a success rate of around 70%!
+
+There are 4 different qa agents one can use right now on our platform in beta. For this specific template and use case, you should only use 2 of them:
+    - Failure Mode Analysis agent -- this agent does a thorogh analysis on why the agent actually failed the task we have it, and where it went wrong during the full trace. This is crucial part for us since failure mode diversity is our most important goal here.
+    - Reward Hacking agent -- this agent goes through the trace and catches agents that try to hack their way into getting a perfect score. This is extremely useful for isntances where, for example, and environment is not built well enough and the golden trace (the original codebase) is not secured and the agent can just copy it and get a score of 100%. We want to avoid this in 100% of our tasks and traces so running this agent is a must when a task is deemed good.
+
 If you are calibrating difficulty more seriously, run multiple attempts and inspect the failures before deciding the task is ready to ship.
 
 ### The validator complains about something that looks correct
@@ -286,8 +292,7 @@ The validator checks prose against exact extracted facts. When it flags somethin
 | `ANTHROPIC_API_KEY` | required for LLM mode | Used for prompt generation and fixer calls |
 | `HUD_API_KEY` | required for HUD commands | Used by `hud eval`, `hud deploy`, and sync |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
-| `HUD_ENV_NAME` | `mario-claire` | Environment name baked into generated `task.py` |
-| `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
+| `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template/task wiring and MUST be changed for your own deployment. || `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
 ## Short Version
 

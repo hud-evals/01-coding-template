@@ -9,6 +9,9 @@ from hud.types import MCPToolCall
 if not os.environ.get("_HUD_DEV_CHILD"):
     from hud import Environment
 
+    # NOTE: `mario-claire` is the original local HUD environment name used while
+    # developing this template. You MUST replace both hardcoded occurrences
+    # below before reusing or shipping tasks for your own environment.
     ENV_NAME = os.environ.get("HUD_ENV_NAME", "mario-claire")
 
     env = Environment("mario-claire")
