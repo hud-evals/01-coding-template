@@ -1,3 +1,6 @@
+# NOTE: `mario-claire` below is the original local HUD environment name used
+# while developing this template. You MUST regenerate this lock file after
+# changing the repo to your own environment.
 version: '1.3'
 images:
   local: 01-coding-template:0.1.18
