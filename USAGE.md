@@ -6,16 +6,27 @@ The agent only sees the prompt. It does not see the hidden tests, the golden sol
 
 ## Current Repo Layout
 
-Right now the workflow is split across two places:
+This repository currently contains two things at once:
 
-- The repo root contains the generator: `src/ast_pilot/`, the generator tests, and this doc.
-- `01-coding-template/` is the deployable HUD environment. It holds the actual task packages, the Docker image, and the `hud build` / `hud eval` / `hud deploy` flow.
+- the generator code at the repo root
+- the deployable HUD environment under `01-coding-template/`
 
-That means you generate from the repo root, then validate and ship from `01-coding-template/`.
+If you are working in this repository, the rule is:
+
+1. From the repo root, run `ast-pilot` to generate `output/<slug>/`.
+2. Copy the generated task into `01-coding-template/tasks/...`.
+3. `cd 01-coding-template` and run `hud build`, `hud eval`, `hud deploy`, or `hud sync tasks`.
+
+So in this repo specifically:
+
+- generate from the repo root
+- validate and ship from `01-coding-template/`
 
 ## Use The Template
 
 If you are a vendor setting this up in a new repo, start from `01-coding-template/`.
+
+Once you copy `01-coding-template/` into its own repo, that new repo root becomes the only working directory. In that setup, there is no split between "repo root" and "template directory" anymore.
 
 That directory is the real HUD environment template. It contains:
 
@@ -24,14 +35,9 @@ That directory is the real HUD environment template. It contains:
 - the task discovery logic
 - the task packages that get built, validated, deployed, and synced
 
-In this repo today, the generator still lives at the root and the deployable HUD environment lives under `01-coding-template/`. So the practical rule is:
-
-- generate from the repo root
-- ship from `01-coding-template/`
-
 ## Setup
 
-Run this from the repo root:
+In this repository, run this from the repo root. If you copied `01-coding-template/` into its own repo, run it from that new repo root:
 
 ```bash
 uv sync
@@ -70,6 +76,8 @@ uv run ast-pilot run path/to/your_module.py \
 If you omit `--output`, the tool defaults to `output/<name>/`.
 
 For real tasks, use the normal LLM-backed flow. It scans the source, renders `start.md`, validates the prompt against the extracted evidence, auto-fixes prompt mistakes when possible, and then packages the task bundle.
+
+If factual validation errors still remain after the auto-fix rounds, `ast-pilot run` stops before bundling so you do not accidentally ship a bad prompt.
 
 In practice, this gets you most of the way there. You usually get:
 
@@ -273,11 +281,12 @@ The simplest QA loop is:
 hud eval . claude --task-ids your-task-slug -y --max-steps 30
 ```
 
-After having successfully ran the tasks on hud, we have a beta feature that you should use called QA Agents. This is still in beta so take it with a grain of salt, but in our internal benchmarks we've seen a success rate of around 70%!
+After you have successfully run tasks on HUD, we have a beta feature you should use called QA Agents. This is still in beta, so take it with a grain of salt, but in our internal benchmarks we have seen a success rate of around 70%.
 
-There are 4 different qa agents one can use right now on our platform in beta. For this specific template and use case, you should only use 2 of them:
-    - Failure Mode Analysis agent -- this agent does a thorogh analysis on why the agent actually failed the task we have it, and where it went wrong during the full trace. This is crucial part for us since failure mode diversity is our most important goal here.
-    - Reward Hacking agent -- this agent goes through the trace and catches agents that try to hack their way into getting a perfect score. This is extremely useful for isntances where, for example, and environment is not built well enough and the golden trace (the original codebase) is not secured and the agent can just copy it and get a score of 100%. We want to avoid this in 100% of our tasks and traces so running this agent is a must when a task is deemed good.
+There are 4 different QA agents in beta on the platform right now. For this specific template and use case, you should only use 2 of them:
+
+- Failure Mode Analysis agent: this agent does a thorough analysis of why the model failed the task and where it went wrong across the full trace. This is a crucial part of the workflow because failure mode diversity is one of the most important goals here.
+- Reward Hacking agent: this agent goes through the trace and catches models that try to hack their way into getting a perfect score. This is especially useful in instances where, for example, an environment is not built securely enough and the model can access or copy the golden trace to get a score of 100%. We want to avoid this in 100% of our tasks and traces, so running this agent is a must once a task is deemed good.
 
 If you are calibrating difficulty more seriously, run multiple attempts and inspect the failures before deciding the task is ready to ship.
 
@@ -292,7 +301,8 @@ The validator checks prose against exact extracted facts. When it flags somethin
 | `ANTHROPIC_API_KEY` | required for LLM mode | Used for prompt generation and fixer calls |
 | `HUD_API_KEY` | required for HUD commands | Used by `hud eval`, `hud deploy`, and sync |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
-| `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template/task wiring and MUST be changed for your own deployment. || `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
+| `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template and task wiring and MUST be changed for your own deployment. |
+| `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
 ## Short Version
 
