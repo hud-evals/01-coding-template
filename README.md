@@ -4,6 +4,8 @@ Coding environment template for 0-to-1 development tasks on the [HUD platform](h
 
 The agent starts in a blank workspace, receives a long markdown prompt describing a library/API to build from scratch, and is graded by running hidden tests against its implementation.
 
+For the end-to-end vendor workflow, task generation process, validation rules, deployment guidance, and calibration advice, start with `USAGE.md`.
+
 ## Quick Start
 
 ```bash

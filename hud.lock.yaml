@@ -1,21 +1,21 @@
 version: '1.3'
 images:
-  local: 01-coding-template:0.1.16
-  full: 01-coding-template:0.1.16@sha256:b6778e86067ca02d99e68575f0c207582fc8cf0d5c28444cae62893498922de9
+  local: 01-coding-template:0.1.18
+  full: 01-coding-template:0.1.18@sha256:59bc98070251a1fce43ceaa4d02d84b126bc2d7567a16bb32c16ff6bffe1e52a
   pushed: null
 build:
-  generatedAt: 2026-04-09T16:07:28.425218+00:00Z
+  generatedAt: 2026-04-09T16:47:24.381752+00:00Z
   hudVersion: 0.5.35
   directory: 01-coding-template
-  version: 0.1.16
+  version: 0.1.18
   platform: linux/amd64
   baseImage: ubuntu:24.04
-  sourceHash: ec8d1b99c2cbde9d40253ee90264fce1b4f94b909720df912af1a8b8249b4413
+  sourceHash: 2e54481088a778e8a0934d97c1ef03476d38f6c284215c7dd2cda1b65316f5d8
   sourceFiles:
   - Dockerfile.hud
   - pyproject.toml
 environment:
-  initializeMs: 3233
+  initializeMs: 3442
   toolCount: 2
   internalToolCount: 0
   variables:

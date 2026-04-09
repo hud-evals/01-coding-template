@@ -16,6 +16,11 @@ for _info in pkgutil.iter_modules(__path__, __name__ + "."):
     if not _info.ispkg:
         continue
     mod = importlib.import_module(_info.name)
+    if not any(isinstance(attr, Task) for attr in vars(mod).values()):
+        try:
+            mod = importlib.import_module(f"{_info.name}.task")
+        except ModuleNotFoundError:
+            continue
     pkg_name = _info.name.rsplit(".", 1)[-1]
     for _attr_name, attr in vars(mod).items():
         if isinstance(attr, Task):

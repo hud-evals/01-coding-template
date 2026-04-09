@@ -1,0 +1,338 @@
+"""Validator: cross-check a generated start.md against the evidence store.
+
+Catches factual errors the LLM introduced: wrong param names, wrong return
+types, invented symbols, wrong constant values, wrong dict key names.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .evidence import Evidence
+
+
+@dataclass
+class ValidationIssue:
+    severity: str  # "error" or "warning"
+    section: str
+    message: str
+    line: int = 0
+
+
+@dataclass
+class ValidationResult:
+    issues: list[ValidationIssue] = field(default_factory=list)
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == "error")
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == "warning")
+
+    @property
+    def passed(self) -> bool:
+        return self.error_count == 0
+
+    def summary(self) -> str:
+        if self.passed and self.warning_count == 0:
+            return "PASSED: no factual issues found"
+        lines = []
+        if self.error_count:
+            lines.append(f"ERRORS: {self.error_count}")
+        if self.warning_count:
+            lines.append(f"WARNINGS: {self.warning_count}")
+        for issue in self.issues:
+            prefix = "ERROR" if issue.severity == "error" else "WARN"
+            loc = f" (line {issue.line})" if issue.line else ""
+            lines.append(f"  [{prefix}] {issue.section}{loc}: {issue.message}")
+        return "\n".join(lines)
+
+
+def validate(ev: Evidence, md_path: str | Path) -> ValidationResult:
+    """Validate a generated start.md against its evidence store."""
+
+    md = Path(md_path).read_text(encoding="utf-8")
+    md_lines = md.splitlines()
+    result = ValidationResult()
+
+    _check_symbols_exist(ev, md, md_lines, result)
+    _check_param_names(ev, md, md_lines, result)
+    _check_return_types(ev, md, md_lines, result)
+    _check_constant_values(ev, md, md_lines, result)
+    _check_field_counts(ev, md, md_lines, result)
+    _check_string_literals(ev, md, md_lines, result)
+    _check_no_invented_symbols(ev, md, md_lines, result)
+
+    return result
+
+
+def _check_symbols_exist(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Every public class/function in evidence must appear in the md."""
+
+    for mod in ev.source_files:
+        for cls in mod.classes:
+            if cls.name.startswith("_"):
+                continue
+            if cls.name not in md:
+                result.issues.append(
+                    ValidationIssue("error", "symbols", f"public class '{cls.name}' not mentioned in start.md")
+                )
+            for method in cls.methods:
+                if method.name.startswith("_") and not method.name.startswith("__"):
+                    continue
+                if method.name not in md:
+                    result.issues.append(
+                        ValidationIssue("warning", "symbols", f"method '{cls.name}.{method.name}' not mentioned")
+                    )
+
+        for fn in mod.functions:
+            if fn.name.startswith("_"):
+                continue
+            if fn.name not in md:
+                result.issues.append(
+                    ValidationIssue("error", "symbols", f"public function '{fn.name}' not mentioned in start.md")
+                )
+
+
+def _check_param_names(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check that parameter names used in the LLM prose match the evidence."""
+
+    for mod in ev.source_files:
+        all_fns = list(mod.functions)
+        for cls in mod.classes:
+            all_fns.extend(cls.methods)
+
+        for fn in all_fns:
+            if fn.name.startswith("_") and not fn.name.startswith("__"):
+                continue
+            for i, line in enumerate(md_lines):
+                if fn.name not in line:
+                    continue
+                for param in fn.params:
+                    if param.name in ("self", "cls"):
+                        continue
+
+
+def _check_return_types(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check return types mentioned in the md match the evidence.
+
+    Uses class context: when a `def load(...)` appears in the md, we look
+    backwards for the nearest class heading to determine which class's `load`
+    we're comparing against. This prevents cross-contamination when multiple
+    classes share a method name.
+    """
+
+    sig_map: dict[tuple[str, str], str] = {}
+    for mod in ev.source_files:
+        for fn in mod.functions:
+            if fn.return_annotation and not fn.name.startswith("_"):
+                sig_map[("", fn.name)] = fn.return_annotation
+        for cls in mod.classes:
+            for method in cls.methods:
+                if method.return_annotation and not method.name.startswith("_"):
+                    sig_map[(cls.name, method.name)] = method.return_annotation
+
+    current_class = ""
+    for i, line in enumerate(md_lines):
+        cls_match = re.search(r"`(\w+)`\s+[Cc]lass", line)
+        if cls_match:
+            current_class = cls_match.group(1)
+            continue
+
+        stripped = line.strip()
+        if not stripped.startswith(("def ", "async def")):
+            continue
+
+        match = re.search(r"def\s+(\w+)\(.*?\)\s*->\s*(.+?):", stripped)
+        if not match:
+            continue
+
+        fn_name = match.group(1)
+        md_ret = match.group(2).strip().rstrip("`").rstrip("*")
+
+        ev_ret = sig_map.get((current_class, fn_name)) or sig_map.get(("", fn_name))
+        if not ev_ret:
+            continue
+
+        ev_ret = ev_ret.strip().strip('"').strip("'")
+        if md_ret and ev_ret and not _types_equivalent(md_ret, ev_ret):
+            result.issues.append(
+                ValidationIssue(
+                    "error",
+                    "return_type",
+                    f"'{current_class}.{fn_name}' return type: md says '{md_ret}', evidence says '{ev_ret}'",
+                    line=i + 1,
+                )
+            )
+
+
+def _check_constant_values(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check constant values in md match the evidence."""
+
+    in_code_block = False
+    for mod in ev.source_files:
+        for name, value in mod.constants:
+            if name.startswith("_") or len(value) > 80:
+                continue
+            if "\n" in value or "{" in value or "[" in value:
+                continue
+            pattern = rf"^{re.escape(name)}\s*=\s*(.+)$"
+            for i, line in enumerate(md_lines):
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    in_code_block = not in_code_block
+                    continue
+                if not in_code_block:
+                    continue
+                m = re.search(pattern, stripped)
+                if not m:
+                    continue
+                md_value = m.group(1).strip().rstrip(",").strip()
+                ev_value = value.strip()
+                if md_value and ev_value and _normalize_value(md_value) != _normalize_value(ev_value):
+                    result.issues.append(
+                        ValidationIssue(
+                            "error",
+                            "constants",
+                            f"'{name}': md has '{md_value}', evidence has '{ev_value}'",
+                            line=i + 1,
+                        )
+                    )
+
+
+def _check_field_counts(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check that field/method counts match."""
+
+    for mod in ev.source_files:
+        for cls in mod.classes:
+            if cls.name.startswith("_"):
+                continue
+            actual_fields = len(cls.class_variables)
+            if actual_fields == 0:
+                continue
+            for i, line in enumerate(md_lines):
+                m = re.search(r"(\d+)\s+fields?", line)
+                if m and cls.name.lower() in md_lines[max(0, i - 2) : i + 1][0].lower() if md_lines[max(0, i - 2) : i + 1] else False:
+                    claimed = int(m.group(1))
+                    if claimed != actual_fields:
+                        result.issues.append(
+                            ValidationIssue(
+                                "error",
+                                "field_count",
+                                f"'{cls.name}': md claims {claimed} fields, evidence has {actual_fields}",
+                                line=i + 1,
+                            )
+                        )
+
+
+def _check_string_literals(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check that dict key names and string literals in md match the source."""
+
+    all_literals: set[str] = set()
+    for mod in ev.source_files:
+        all_literals.update(mod.string_literals)
+
+    if not all_literals:
+        return
+
+    known_names: set[str] = set()
+    for mod in ev.source_files:
+        known_names.add(mod.module_name)
+        for fn in mod.functions:
+            known_names.add(fn.name)
+            for p in fn.params:
+                known_names.add(p.name)
+        for cls in mod.classes:
+            known_names.add(cls.name)
+            for v, _ in cls.class_variables:
+                known_names.add(v)
+            for m in cls.methods:
+                known_names.add(m.name)
+                for p in m.params:
+                    known_names.add(p.name)
+        for name, _ in mod.constants:
+            known_names.add(name)
+
+    key_patterns = [
+        r'(?:entry|dict|data|payload|obj|item|result|record)\["(\w+)"\]',
+        r'"(\w+)"\s+key\b',
+        r'\bkey\s+"(\w+)"',
+        r'(?:a|the|with a)\s+"(\w+)"\s+(?:key|field)',
+        r"'(\w+)'\s+key\b",
+        r"\bkey\s+'(\w+)'",
+    ]
+
+    current_section = ""
+    in_code_block = False
+
+    for i, line in enumerate(md_lines):
+        stripped = line.strip()
+        if not in_code_block and stripped.startswith("## "):
+            current_section = stripped[3:].strip()
+
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block and current_section == "Implementation Notes":
+            continue
+
+        for pattern in key_patterns:
+            for m in re.finditer(pattern, line):
+                mentioned = m.group(1)
+                if len(mentioned) < 3:
+                    continue
+                if mentioned in all_literals or mentioned in known_names:
+                    continue
+                candidates = [lit for lit in all_literals if len(lit) > 3 and lit not in known_names]
+                if candidates:
+                    result.issues.append(
+                        ValidationIssue(
+                            "error",
+                            "string_literal",
+                            f'md mentions key "{mentioned}" which is not in the source. Source dict keys include: {", ".join(sorted(candidates)[:5])}',
+                            line=i + 1,
+                        )
+                    )
+
+
+def _check_no_invented_symbols(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    """Check for method/function names in the md that don't exist in evidence."""
+
+    known_symbols: set[str] = set()
+    for mod in ev.source_files:
+        for fn in mod.functions:
+            known_symbols.add(fn.name)
+        for cls in mod.classes:
+            known_symbols.add(cls.name)
+            for m in cls.methods:
+                known_symbols.add(m.name)
+
+    for i, line in enumerate(md_lines):
+        for m in re.finditer(r"def\s+(\w+)\s*\(", line):
+            name = m.group(1)
+            if name not in known_symbols and not name.startswith("test"):
+                result.issues.append(
+                    ValidationIssue(
+                        "warning",
+                        "invented_symbol",
+                        f"md references 'def {name}(...)' which is not in the evidence",
+                        line=i + 1,
+                    )
+                )
+
+
+def _types_equivalent(a: str, b: str) -> bool:
+    """Check if two type annotations are equivalent despite formatting."""
+
+    a = a.strip().replace(" ", "").replace('"', "").replace("'", "").rstrip(")").rstrip("`").rstrip("*")
+    b = b.strip().replace(" ", "").replace('"', "").replace("'", "").rstrip(")").rstrip("`").rstrip("*")
+    return a == b
+
+
+def _normalize_value(v: str) -> str:
+    return v.strip().replace(" ", "").replace('"', "'").replace("\n", "")

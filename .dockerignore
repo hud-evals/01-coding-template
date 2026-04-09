@@ -18,6 +18,7 @@ USAGE.md
 
 # ast-pilot tool — must not be in the Docker image
 src/
+tests/
 output/
 ast_test/
 evidence*.json
