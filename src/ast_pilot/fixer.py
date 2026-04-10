@@ -32,6 +32,7 @@ def fix_issues(
     """
 
     md = Path(md_path).read_text(encoding="utf-8")
+    had_trailing_newline = md.endswith("\n")
     md_lines = md.splitlines()
     actions: list[FixAction] = []
 
@@ -79,10 +80,10 @@ Output ONLY one of those two lines. Nothing else."""
 
         if response.startswith("FIX:"):
             fix_text = response[4:].strip()
-            old_line = md_lines[issue.line - 1] if issue.line > 0 else ""
+            old_line = md_lines[issue.line - 1] if 0 < issue.line <= len(md_lines) else ""
             if old_line and fix_text:
-                md = md.replace(old_line, fix_text, 1)
-                md_lines = md.splitlines()
+                md_lines[issue.line - 1] = fix_text
+                md = _join_lines(md_lines, had_trailing_newline)
                 actions.append(
                     FixAction(
                         issue=issue,
@@ -114,6 +115,13 @@ Output ONLY one of those two lines. Nothing else."""
     return md, actions
 
 
+def _join_lines(lines: list[str], had_trailing_newline: bool) -> str:
+    md = "\n".join(lines)
+    if had_trailing_newline:
+        md += "\n"
+    return md
+
+
 def _get_context(lines: list[str], line_num: int, window: int = 5) -> str:
     if line_num <= 0 or line_num > len(lines):
         return ""
@@ -139,17 +147,16 @@ def _get_relevant_evidence(ev: Evidence, issue: ValidationIssue) -> str:
                 )
 
     elif issue.section == "return_type":
-        fn_name = ""
-        m = re.match(r"'(\w+)'", issue.message)
-        if m:
-            fn_name = m.group(1)
+        owner_name, fn_name = _issue_symbol(issue.message)
         for mod in ev.source_files:
             for fn in mod.functions:
-                if fn.name == fn_name:
+                if not owner_name and fn.name == fn_name:
                     lines.append(f"def {fn.name}(...) -> {fn.return_annotation}")
             for cls in mod.classes:
                 for method in cls.methods:
-                    if method.name == fn_name:
+                    if cls.name == owner_name and method.name == fn_name:
+                        lines.append(f"{cls.name}.{method.name}(...) -> {method.return_annotation}")
+                    elif not owner_name and method.name == fn_name:
                         lines.append(f"{cls.name}.{method.name}(...) -> {method.return_annotation}")
 
     elif issue.section == "field_count":
@@ -191,6 +198,15 @@ def _get_llm_client():
         return anthropic.Anthropic(api_key=api_key)
     except ImportError:
         return None
+
+
+def _issue_symbol(message: str) -> tuple[str, str]:
+    match = re.match(r"'([\w\.]+)'", message)
+    if not match:
+        return "", ""
+    symbol = match.group(1)
+    owner_name, _, symbol_name = symbol.rpartition(".")
+    return owner_name, symbol_name or symbol
 
 
 def _call_llm(prompt: str, max_tokens: int = 512) -> Optional[str]:

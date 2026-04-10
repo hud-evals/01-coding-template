@@ -6,6 +6,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
+import tempfile
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
@@ -51,29 +52,45 @@ def cmd_bundle(args: argparse.Namespace) -> None:
     from .grader_gen import generate_graders
 
     ev = Evidence.load(args.evidence)
-    out_dir = args.output or "output"
+    out_dir, cleanup_after_success = _prepare_bundle_root(args.output, ev.project_name)
+    prompt_path = Path(args.prompt) if args.prompt else Path(args.evidence).with_name("start.md")
+    prompt_md = _load_validated_prompt(ev, prompt_path)
+    source_paths = [mod.path for mod in ev.source_files]
+    test_paths = sorted({test.test_file for test in ev.tests})
 
-    files = generate_graders(ev, output_dir=out_dir)
-    print(f"Generated {len(files)} files in {out_dir}/:")
-    for path in sorted(files):
-        print(f"  {path}")
+    promoted_to: Path | None = None
+    try:
+        files = generate_graders(
+            ev,
+            output_dir=out_dir,
+            prompt_md=prompt_md,
+            source_paths=source_paths,
+            test_paths=test_paths,
+        )
+        print(f"Generated {len(files)} files in {out_dir}/:")
+        for path in sorted(files):
+            print(f"  {path}")
 
-    promoted_to = _promote_generated_task(Path(out_dir), ev.project_name)
-    if promoted_to is not None:
-        print(f"Promoted task package -> {promoted_to}")
+        promoted_to = _promote_generated_task(out_dir, ev.project_name)
+        if promoted_to is not None:
+            print(f"Promoted task package -> {promoted_to}")
+        print(_bundle_result_message(out_dir, promoted_to, kept_artifacts=bool(args.output)))
+    finally:
+        if cleanup_after_success and promoted_to is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Full pipeline: scan -> spec -> bundle in one shot."""
 
+    from .grader_gen import generate_graders
     from .scanner import scan
     from .spec_renderer import render_start_md
-    from .grader_gen import generate_graders
 
     source_paths = [Path(p) for p in args.sources]
     test_paths = [Path(p) for p in args.tests] if args.tests else None
     readme = Path(args.readme) if args.readme else None
-    out_dir = Path(args.output or f"output/{args.name}")
+    out_dir, cleanup_after_success = _prepare_bundle_root(args.output, args.name)
     use_llm = not args.no_llm
 
     print(f"=== Scanning {len(source_paths)} source files ===")
@@ -146,20 +163,26 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
     print("\n=== Generating task bundle ===")
-    files = generate_graders(
-        ev,
-        output_dir=out_dir,
-        source_paths=source_paths,
-        test_paths=test_paths,
-    )
-    for path in sorted(files):
-        print(f"  {path}")
+    promoted_to: Path | None = None
+    try:
+        files = generate_graders(
+            ev,
+            output_dir=out_dir,
+            prompt_md=md,
+            source_paths=source_paths,
+            test_paths=test_paths,
+        )
+        for path in sorted(files):
+            print(f"  {path}")
 
-    promoted_to = _promote_generated_task(out_dir, ev.project_name)
-    if promoted_to is not None:
-        print(f"\nPromoted task package -> {promoted_to}")
+        promoted_to = _promote_generated_task(out_dir, ev.project_name)
+        if promoted_to is not None:
+            print(f"\nPromoted task package -> {promoted_to}")
 
-    print(f"\nDone. Output in {out_dir}/")
+        print(f"\n{_bundle_result_message(out_dir, promoted_to, kept_artifacts=bool(args.output))}")
+    finally:
+        if cleanup_after_success and promoted_to is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def _promote_generated_task(output_root: Path, project_name: str) -> Path | None:
@@ -187,6 +210,41 @@ def _undismissed_errors(vr, dismissed_keys: set[str]) -> list:
         if issue.severity == "error"
         and f"{issue.line}:{issue.message[:60]}" not in dismissed_keys
     ]
+
+
+def _load_validated_prompt(ev: Evidence, prompt_path: Path) -> str:
+    from .validator import validate
+
+    if not prompt_path.is_file():
+        print(f"Prompt markdown not found: {prompt_path}")
+        raise SystemExit(2)
+
+    print(f"=== Validating prompt markdown: {prompt_path} ===")
+    vr = validate(ev, prompt_path)
+    print(f"  {vr.summary()}")
+
+    remaining_errors = _undismissed_errors(vr, set())
+    if remaining_errors:
+        print("\nValidation failed: unresolved factual errors remain in the prompt markdown.")
+        for issue in remaining_errors:
+            print(f"  [ERROR] {issue.message}")
+        raise SystemExit(2)
+
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def _prepare_bundle_root(output: str | None, project_name: str) -> tuple[Path, bool]:
+    if output:
+        return Path(output), False
+    return Path(tempfile.mkdtemp(prefix=f"ast_pilot_{_pkg_name(project_name)}_")), True
+
+
+def _bundle_result_message(out_dir: Path, promoted_to: Path | None, kept_artifacts: bool) -> str:
+    if promoted_to is not None:
+        if kept_artifacts:
+            return f"Done. Task package updated at {promoted_to} and bundle artifacts kept in {out_dir}/"
+        return f"Done. Task package updated at {promoted_to}"
+    return f"Done. Bundle artifacts kept in {out_dir}/"
 
 
 def _slug(name: str) -> str:
@@ -220,7 +278,8 @@ def main() -> None:
 
     p_bundle = sub.add_parser("bundle", help="Generate HUD v5 grader bundle from evidence.json")
     p_bundle.add_argument("evidence", help="Path to evidence.json")
-    p_bundle.add_argument("--output", "-o", help="Output directory (default: output/)")
+    p_bundle.add_argument("--prompt", help="Path to validated prompt markdown (default: sibling start.md)")
+    p_bundle.add_argument("--output", "-o", help="Optional bundle root to keep generated artifacts")
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_run = sub.add_parser("run", help="Full pipeline: scan -> spec -> bundle")
@@ -228,7 +287,7 @@ def main() -> None:
     p_run.add_argument("--tests", nargs="*", help="Test files to map")
     p_run.add_argument("--name", default="my-library", help="Project name")
     p_run.add_argument("--readme", help="Path to README.md")
-    p_run.add_argument("--output", "-o", help="Output directory")
+    p_run.add_argument("--output", "-o", help="Optional bundle root to keep generated artifacts")
     p_run.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
     p_run.set_defaults(func=cmd_run)
 

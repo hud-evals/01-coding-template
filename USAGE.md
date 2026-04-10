@@ -1,35 +1,45 @@
 # Using ast-pilot
 
-`ast-pilot` turns a Python module and its pytest coverage into a 0-to-1 HUD coding task. The generated task gives an agent a long-form spec, an empty workspace, and hidden tests that grade the implementation.
+`ast-pilot` turns a Python module plus pytest coverage into a 0-to-1 HUD coding task. It generates:
+
+- an agent-facing prompt
+- hidden tests
+- golden validation steps
+- hidden support files and hidden pip requirements when needed
+- the `task.py` wiring needed to run the task on HUD
 
 It covers the full path from source module to shippable HUD task.
 
-The agent only sees the prompt. It does not see the hidden tests, the golden solution, or the hidden support tree used during validation.
+The agent only sees `prompt.md`. It does not see the hidden tests, the golden solution, the hidden support tree, or `requirements.hidden.txt`.
 
 ## What This Directory Is
 
-Treat this directory as the working root for this guide.
+Treat `01-coding-template/` as the working root.
 
-It contains both the task generator and the HUD environment that runs the generated tasks:
+This directory contains both:
+
+- the generator under `src/ast_pilot/`
+- the deployable HUD environment under `env.py`, `cli.py`, `Dockerfile.hud`, and `tasks/`
 
 ```text
 .
-├── src/ast_pilot/      # scanner, renderer, validator, and bundle generator
-├── tasks/              # importable HUD task packages (`tasks/<pkg>/task.py`)
-├── env.py              # HUD environment and `coding-task` scenario
+├── src/ast_pilot/      # scanner, renderer, validator, fixer, and task generator
+├── tasks/              # generated HUD task packages (`tasks/<pkg>/task.py`)
+├── env.py              # HUD environment and shared coding scenario
+├── task_bootstrap.py   # local .env loading for generated tasks
 ├── build_support.py    # hidden support staging during image builds
-├── scripts.py          # helper for syncing local tasks to a HUD taskset
 ├── Dockerfile.hud      # image definition used by `hud build` / `hud deploy`
 └── USAGE.md            # this file
 ```
 
 The mental model is simple:
 
-- run `ast-pilot` to generate or update a task package in `tasks/<task_package>/`
+- run `ast-pilot` here
+- generated tasks land directly in `tasks/<task_package>/`
 - review the generated task package in `tasks/`
-- build, validate, deploy, and sync from this directory
+- build, deploy, validate, and sync from this directory
 
-Open a shell in this directory and follow the commands below exactly as written.
+Normal usage is tasks-first. The final artifact goes straight into `tasks/` in the happy path.
 
 ## Setup
 
@@ -38,11 +48,17 @@ Run everything below from this directory:
 ```bash
 uv sync
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY and HUD_API_KEY
+# Fill in ANTHROPIC_API_KEY, HUD_API_KEY, and HUD_ENV_NAME
 source .env
 ```
 
-You only need `ANTHROPIC_API_KEY` for LLM-generated prose. You need `HUD_API_KEY` for `hud eval`, `hud deploy`, and task sync.
+What the important variables do:
+
+- `ANTHROPIC_API_KEY`: used for LLM prompt generation and fixer passes
+- `HUD_API_KEY`: used for HUD commands such as `hud build`, `hud deploy`, and `hud eval`
+- `HUD_ENV_NAME`: the deployed HUD environment name your generated tasks connect to
+
+Important: `.env` is intentionally excluded from the Docker image. Local task import and sync can read `HUD_ENV_NAME` from `.env`, but the deployed environment itself must not depend on `.env` being present inside the image.
 
 ## What Makes a Good Source Module
 
@@ -53,109 +69,38 @@ Pick a source file that:
 - has a clear API surface, even if some tested helpers are private
 - does not depend on live services like databases, external APIs, or a running app server
 
-Pure logic modules are still the easiest wins, but the current grader can also carry hidden repo-internal support modules when validation needs them.
+Pure logic modules are still the easiest wins, but the current generator can also carry hidden repo-internal support modules when validation needs them.
 
-## The Normal Workflow
+## End-to-End Workflow
 
-### 1. Generate the task bundle
+### 1. Generate the task package
 
 From this directory:
 
 ```bash
-source .env
-
 uv run ast-pilot run path/to/your_module.py \
     --tests path/to/test_your_module.py \
     --name your-task-slug
 ```
 
-When you run this from this directory, the task package you will actually work with ends up in `tasks/your_task_slug/`.
+This command does the whole authoring pipeline:
 
-For real tasks, use the normal LLM-backed flow. It scans the source, renders `start.md`, validates the prompt against the extracted evidence, auto-fixes prompt mistakes when possible, and then packages the task bundle.
+1. scans the source and tests
+2. renders `start.md`
+3. validates the prose against exact extracted evidence
+4. runs up to three fixer rounds when LLM mode is enabled
+5. generates the HUD task package
+6. promotes the generated task directly into `tasks/your_task_slug/`
 
-If factual validation errors still remain after the auto-fix rounds, `ast-pilot run` stops before bundling so you do not accidentally ship a bad prompt.
+If unresolved factual validation errors remain, generation stops before bundling. That is intentional: the tool now refuses to ship a prompt that drifted away from the code.
 
-In practice, this gets you most of the way there. You usually get:
+For real tasks, use normal LLM mode. `--no-llm` is only for fast structural smoke tests.
 
-- the HUD-compatible task package structure
-- a generated `task.py`
-- hidden tests and golden validation files
-- hidden support modules and hidden dependency manifests when they are needed
+Also important: if hidden tests depend on repo-internal modules that the generator cannot safely carry forward, generation now fails by default instead of silently inserting `skip` or `xfail`. If you intentionally want the old downgraded behavior, set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`.
 
-You should still review the generated task package before shipping, especially for task difficulty, prompt clarity, and odd dependency edges.
+### 2. Review the generated task package
 
-If hidden tests depend on repo-internal modules that the generator cannot safely carry forward, generation now fails by default instead of silently inserting `skip` or `xfail` markers. If you intentionally want that downgraded behavior, set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`.
-
-### 2. Review the generated task in `tasks/`
-
-The HUD task ID is still slug-shaped, for example `anthropic-adapter`, but the package directory under `tasks/` must be importable Python, so the on-disk folder uses underscores instead:
-
-```text
-tasks/anthropic_adapter/
-```
-
-That task package is the thing you build, validate, deploy, and sync.
-
-### 3. Build and validate before doing anything else
-
-Validation happens from this same directory:
-
-```bash
-hud build .
-hud eval . integration_test --task-ids your-task-slug -y
-```
-
-This is the release gate. If `integration_test` does not return `Reward: 1.000`, the task is not sound yet and should not be deployed or synced.
-
-If you want a broader sweep:
-
-```bash
-hud eval . integration_test --all -y
-```
-
-### 4. Run the task against an agent
-
-Once the harness is sound, evaluate the real task difficulty:
-
-```bash
-hud eval . claude --task-ids your-task-slug -y --max-steps 30
-```
-
-This is a separate question from `integration_test`. A task can be perfectly valid and still be hard for the model.
-
-### 5. Deploy and sync
-
-After the task validates cleanly:
-
-```bash
-hud deploy .
-uv run sync-tasks --taskset <taskset-name> --env <env-name>
-```
-
-What each command does:
-
-- `hud deploy .` creates or updates the HUD environment image
-- `uv run sync-tasks ...` uploads the local task definitions to the HUD taskset
-
-Important: task sync is not a universal replacement for `hud deploy .`.
-
-You still need to redeploy when you change anything that affects the environment image, including:
-
-- `env.py`, `cli.py`, `Dockerfile.hud`, `pyproject.toml`, or `build_support.py`
-- hidden support modules under `support/`
-- hidden dependency manifests such as `requirements.hidden.txt`
-- anything else that must exist inside the built image for validation to work
-
-If you only changed task metadata or prompt content, sync may be enough. If you are unsure, run both.
-
-The current template and generated tasks still default to `HUD_ENV_NAME=mario-claire` because that was the original local development environment name used while building this repo. That placeholder is hardcoded in `env.py`, generated `task.py`, and current build metadata, and you MUST change it for your own environment before reusing or shipping this template.
-
-For larger-scale usage patterns, see the HUD docs:
-[Running at Scale](https://docs.hud.ai/building/running-at-scale)
-
-## What Gets Generated
-
-`ast-pilot run` creates a task package like this under `tasks/`:
+The on-disk folder must be valid Python, so the package directory uses underscores:
 
 ```text
 tasks/your_task_slug/
@@ -168,27 +113,139 @@ tasks/your_task_slug/
 └── requirements.hidden.txt
 ```
 
-Here is what each piece is for:
+The task slug itself stays hyphenated, for example `your-task-slug`.
 
-- `prompt.md` is the agent-facing version of that spec.
-- `task.py` wires the task into the HUD environment, injects the hidden tests, and defines the golden validation steps.
-- `tests/` contains the hidden pytest files used for grading.
-- `golden/` contains the original source files used by `hud eval . integration_test`.
-- `support/` contains hidden repo-internal helper modules and packages needed only for grading.
-- `requirements.hidden.txt` lists hidden pip dependencies that need to be installed into the image for grading.
+Generated `task.py` files now do three important things out of the box:
 
-The hidden tests are injected at runtime. They are not copied into the agent's workspace. The hidden support tree is staged into the image for validation, not exposed as normal agent workspace files.
+- they hardcode the stable scenario ID `ast-pilot:coding-task`
+- they load `HUD_ENV_NAME` locally through `task_bootstrap.py`
+- they connect to the deployed HUD environment named by `HUD_ENV_NAME`
 
-## Why `integration_test` Matters
+That hardcoded scenario split is intentional. The scenario inside the environment stays stable, while the actual deployed HUD environment name remains configurable.
 
-`hud eval . integration_test` is the authoritative check that the task harness is correct. It verifies that:
+### 3. Build the local image
 
-- the golden solution can be injected into the blank workspace
-- the hidden tests run successfully against that golden solution
-- the hidden support modules and hidden dependencies are staged correctly
-- the task wiring in `task.py` is sound
+```bash
+hud build .
+```
 
-If this step fails, the task setup is broken. Fix the harness first. Do not diagnose agent behavior until this passes.
+This is your local image sanity check. It catches build failures, packaging problems, and missing runtime files before you touch the platform.
+
+But `hud build .` only updates your local image. It does not change the deployed HUD environment that hub-connected tasks use.
+
+### 4. Deploy the environment used by the tasks
+
+```bash
+hud deploy . -n "$HUD_ENV_NAME"
+```
+
+This updates the real HUD environment that generated tasks connect to.
+
+Safe rule: after you regenerate a task and before you trust a platform-side `integration_test`, deploy first.
+
+You definitely need to redeploy when you changed anything that affects the environment image, including:
+
+- `env.py`, `task_bootstrap.py`, `cli.py`, `Dockerfile.hud`, `pyproject.toml`, or `build_support.py`
+- hidden support modules under `tasks/<task>/support/`
+- hidden dependency manifests such as `requirements.hidden.txt`
+- any generated task content that must exist inside the image for grading to work
+
+### 5. Run the release-gate validation
+
+```bash
+hud eval . integration_test --task-ids your-task-slug -y
+```
+
+This is the release gate. A task is not ready until this returns `Reward: 1.000`.
+
+If you want a full sweep:
+
+```bash
+hud eval . integration_test --all -y
+```
+
+In plain English, `integration_test` checks that:
+
+- the task can start from a blank workspace
+- the golden solution can be injected correctly
+- the hidden tests pass against the golden solution
+- hidden support files and hidden pip dependencies are staged correctly
+- the generic `ast-pilot:coding-task` scenario and the generated `task.py` wiring agree with each other
+
+For this template, that validation is against the HUD environment the task connects to. That is why stale deploys can make `integration_test` keep failing even after local code changed.
+
+### 6. Run real agent evals
+
+Once the harness is sound, test actual difficulty:
+
+```bash
+hud eval . claude --task-ids your-task-slug -y --max-steps 30
+```
+
+This answers a different question from `integration_test`. A task can be perfectly valid and still be too hard, too vague, or too annoying for the model.
+
+### 7. Sync tasks to a taskset
+
+```bash
+hud sync tasks <taskset-name>
+```
+
+This uploads your local task definitions to a HUD taskset.
+
+Task sync is not a replacement for deploy:
+
+- `hud deploy . -n "$HUD_ENV_NAME"` updates the environment image
+- `hud sync tasks <taskset-name>` updates task definitions on the platform
+
+If you are not sure whether a change needs both, the safe answer is yes.
+
+For larger-scale usage patterns, see the HUD docs:
+[Running at Scale](https://docs.hud.ai/building/running-at-scale)
+
+## What The Main Commands Actually Do
+
+These four commands were the big source of confusion during development, so here is the layman version:
+
+- `hud build .`: build and sanity-check the image locally
+- `hud deploy . -n "$HUD_ENV_NAME"`: push the current environment image to the HUD platform
+- `hud eval . integration_test ...`: validate the task harness against the environment the task connects to
+- `hud sync tasks <taskset-name>`: upload task definitions to a HUD taskset
+
+The practical consequence is:
+
+- if you changed only local authoring files and want a quick local sanity check, `hud build .` is useful
+- if you changed shared runtime wiring or anything that must live inside the deployed image, you must `hud deploy` before trusting platform eval results
+
+## What Gets Generated
+
+Normal tasks-first usage leaves the final task package under `tasks/`. Intermediate evidence and prompt artifacts are generated during the run and cleaned up automatically after a successful promotion.
+
+Here is what each generated file is for:
+
+- `prompt.md`: the agent-facing task description
+- `task.py`: wires the task into HUD, injects hidden tests, stages hidden runtime support, and defines golden validation
+- `tests/`: hidden pytest files used for grading
+- `golden/`: original source files used to build the golden validation path
+- `support/`: hidden repo-internal helper modules and packages needed only for grading
+- `requirements.hidden.txt`: hidden pip dependencies needed only for grading
+
+The hidden tests are injected at runtime. They are not copied into the agent's normal workspace.
+
+## Why The Scenario Is Hardcoded
+
+Generated tasks now hardcode:
+
+```python
+SCENARIO_ID = "ast-pilot:coding-task"
+```
+
+This happens out of the box in the generator. You do not need to patch it by hand for new tasks.
+
+That split exists for a reason:
+
+- the environment exports one stable shared scenario, `ast-pilot:coding-task`
+- `HUD_ENV_NAME` chooses which deployed HUD environment to talk to
+- keeping those two concepts separate prevents deployed images from crashing just because `.env` is not baked into the image
 
 ## Known Limitations
 
@@ -199,26 +256,21 @@ The generator is in good shape, but it is not magic. The current boundaries are:
 - pure Python modules are the safest path today
 - modules that depend on native extensions, live services, databases, or app runtime state are not good task candidates
 - `integration_test` proves the harness is sound, but it does not prove the task will be easy for a model
-- syncing tasks is not always enough after the first deploy; if hidden support, hidden dependencies, or shared environment files changed, you must run `hud deploy .` again so the image actually contains those changes
 
 If you want the highest reliability, prefer focused, self-contained modules with strong test coverage and minimal runtime coupling.
 
-## LLM Mode vs `--no-llm`
-
-Use LLM mode for real tasks.
-
-`--no-llm` is only for fast structural checks when you want to test the pipeline without spending model calls. The deterministic prompt is accurate, but it reads like a technical dump and performs noticeably worse with real agents.
-
-Dry-run example:
-
-```bash
-uv run ast-pilot run path/to/source.py \
-    --tests path/to/tests.py \
-    --name my-task \
-    --no-llm
-```
-
 ## Troubleshooting
+
+### `HUD_ENV_NAME is required`
+
+For local commands, the fix is simple:
+
+- put `HUD_ENV_NAME=<your-deployed-env-name>` in `.env`
+- run `source .env` before HUD commands
+
+Generated tasks and `hud sync tasks` both expect that variable locally.
+
+The deployed environment itself should not depend on `.env` existing inside the image.
 
 ### `ModuleNotFoundError` during `integration_test`
 
@@ -228,11 +280,11 @@ The usual causes are:
 - a missing hidden third-party dependency in `requirements.hidden.txt`
 - a hidden test import that was not rewritten correctly for the workspace module name
 
-Check the failing import first. That will usually tell you whether the problem is hidden support, a missing dependency, or a bad test rewrite.
+Check the failing import first. It will usually tell you whether the problem is hidden support, a missing dependency, or a bad test rewrite.
 
 ### Generation fails because hidden tests reference unsupported internal modules
 
-The generator now fails by default when hidden tests depend on repo-internal modules that it cannot safely bundle for grading. That is intentional: silently downgrading those tests with `skip` or `xfail` makes the task look sounder than it really is.
+That is now expected behavior. The generator fails by default rather than silently weakening the test suite.
 
 Your options are:
 
@@ -240,15 +292,17 @@ Your options are:
 - manually reduce the hidden test surface so the unsupported imports go away
 - only if you intentionally accept downgraded coverage, rerun with `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`
 
-### `Reward: 0.000` in `integration_test`
+### `integration_test` still shows old behavior after you fixed the code
 
-Treat this as a broken task harness, not a model failure.
+That usually means the platform is still running an older deployed image.
 
-Common causes:
+Run:
 
-- the golden source cannot import one of its hidden dependencies
-- the hidden tests still refer to the original package path instead of the workspace module
-- the task package was copied into the wrong directory name under `tasks/`
+```bash
+hud build .
+hud deploy . -n "$HUD_ENV_NAME"
+hud eval . integration_test --task-ids your-task-slug -y
+```
 
 ### `integration_test` passes but agent pass rate is poor
 
@@ -278,28 +332,21 @@ The simplest QA loop is:
 hud eval . claude --task-ids your-task-slug -y --max-steps 30
 ```
 
-After you have successfully run tasks on HUD, we have a beta feature you should use called QA Agents. This is still in beta, so take it with a grain of salt, but in our internal benchmarks we have seen a success rate of around 70%.
-
-There are 4 different QA agents in beta on the platform right now. For this specific template and use case, you should only use 2 of them:
-
-- Failure Mode Analysis agent: this agent does a thorough analysis of why the model failed the task and where it went wrong across the full trace. This is a crucial part of the workflow because failure mode diversity is one of the most important goals here.
-- Reward Hacking agent: this agent goes through the trace and catches models that try to hack their way into getting a perfect score. This is especially useful in instances where, for example, an environment is not built securely enough and the model can access or copy the golden trace to get a score of 100%. We want to avoid this in 100% of our tasks and traces, so running this agent is a must once a task is deemed good.
-
 If you are calibrating difficulty more seriously, run multiple attempts and inspect the failures before deciding the task is ready to ship.
 
 ### The validator complains about something that looks correct
 
-The validator checks prose against exact extracted facts. When it flags something suspicious, inspect the specific line and compare it with `evidence.json`. Some false positives do happen, but most real failures come from signatures, constants, or field names drifting in prose.
+The validator checks prose against exact extracted facts. When it flags something suspicious, inspect the specific line and compare it with the extracted evidence. Some false positives do happen, but most real failures come from signatures, constants, or field names drifting in prose.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | required for LLM mode | Used for prompt generation and fixer calls |
-| `HUD_API_KEY` | required for HUD commands | Used by `hud eval`, `hud deploy`, and sync |
+| `HUD_API_KEY` | required for HUD commands | Used by `hud build`, `hud deploy`, `hud eval`, and sync |
+| `HUD_ENV_NAME` | required | Deployed HUD environment name used by local task import, generated tasks, and sync |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
-| `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation. |
-| `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template and task wiring and MUST be changed for your own deployment. |
+| `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation |
 | `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
 ## Short Version
@@ -307,7 +354,8 @@ The validator checks prose against exact extracted facts. When it flags somethin
 If you only remember one path, remember this:
 
 1. Generate with `uv run ast-pilot run ...`
-2. Copy the task into `tasks/...`
-3. Run `hud build .`
+2. Run `hud build .`
+3. Run `hud deploy . -n "$HUD_ENV_NAME"`
 4. Run `hud eval . integration_test --task-ids <slug> -y`
-5. Only then run model evals or deploy
+5. Run real model evals
+6. Sync with `hud sync tasks <taskset-name>`

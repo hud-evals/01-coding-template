@@ -24,7 +24,6 @@ dev = [
 [project.scripts]
 ast-pilot = "ast_pilot.cli:main"
 hud_eval = "cli:main"
-sync-tasks = "scripts:sync_tasks"
 
 [tool.uv]
 package = true
@@ -46,6 +45,9 @@ unfixable = []
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ast_pilot", "."]

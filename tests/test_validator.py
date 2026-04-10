@@ -159,6 +159,43 @@ class ValidatorTests(unittest.TestCase):
             vr = validate(ev, md_path)
             self.assertTrue(any(issue.section == "parameters" and "/" in issue.message for issue in vr.issues))
 
+    def test_field_count_check_uses_nearby_class_heading_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "sample.py"
+            source_path.write_text(
+                textwrap.dedent(
+                    """
+                    class Widget:
+                        first = 1
+                        second = 2
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(source_paths=[source_path], project_name="sample")
+            md_path = root / "start.md"
+            md_path.write_text(
+                textwrap.dedent(
+                    """
+                    # sample
+
+                    ## API Usage Guide
+
+                    Intro text before the class heading.
+                    ### 1. `Widget` Class
+                    This class has 3 fields.
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            vr = validate(ev, md_path)
+            self.assertTrue(any(issue.section == "field_count" and "Widget" in issue.message for issue in vr.issues))
+
 
 if __name__ == "__main__":
     unittest.main()

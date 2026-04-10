@@ -79,10 +79,11 @@ WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
 RUN uv venv && . .venv/bin/activate && uv sync --no-install-project --extra dev && uv pip install -e .
-ENV PYTHONPATH=/mcp_server/.venv/lib/python3.12/site-packages:/mcp_server
+ENV PYTHONPATH=/mcp_server
 ENV PATH=/mcp_server/.venv/bin:$PATH
 
 COPY ./env.py /mcp_server/env.py
+COPY ./task_bootstrap.py /mcp_server/task_bootstrap.py
 COPY ./cli.py /mcp_server/cli.py
 COPY ./grading /mcp_server/grading
 COPY ./tasks /mcp_server/tasks

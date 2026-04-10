@@ -5,19 +5,21 @@ from pathlib import Path
 
 from hud.eval.task import Task
 from hud.types import MCPToolCall
+from task_bootstrap import require_hud_env_name
 
 if not os.environ.get("_HUD_DEV_CHILD"):
     from hud import Environment
 
-    # NOTE: `mario-claire` is the original local HUD environment name used while
-    # developing this template. You MUST replace both hardcoded occurrences
-    # below before reusing or shipping tasks for your own environment.
-    ENV_NAME = os.environ.get("HUD_ENV_NAME", "mario-claire")
-
-    env = Environment("mario-claire")
-    env.connect_hub(ENV_NAME)
+    SCENARIO_ID = "ast-pilot:coding-task"
 
     TASK_DIR = Path(__file__).parent
+    ENV_NAME = require_hud_env_name(
+        TASK_DIR.parents[1] / ".env",
+        error_message="HUD_ENV_NAME is required. Set it before running this task.",
+    )
+    env = Environment(ENV_NAME)
+    env.connect_hub(ENV_NAME)
+
     TESTS_DIR = TASK_DIR / "tests"
     GOLDEN_DIR = TASK_DIR / "golden"
     SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name
@@ -45,7 +47,7 @@ if not os.environ.get("_HUD_DEV_CHILD"):
 
     task = Task(
         env=env,
-        scenario="coding-task",
+        scenario=SCENARIO_ID,
         args={
             "prompt": (TASK_DIR / "prompt.md").read_text(),
             "bash_checks": [

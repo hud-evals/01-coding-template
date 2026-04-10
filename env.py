@@ -13,11 +13,10 @@ from hud import Environment
 from hud.tools.coding import BashTool, EditTool
 
 logger = logging.getLogger(__name__)
+SCENARIO_ENV_NAME = "ast-pilot"
+SCENARIO_ID = f"{SCENARIO_ENV_NAME}:coding-task"
 
-# NOTE: `mario-claire` is the original local HUD environment name used while
-# developing this template. You MUST replace this hardcoded value before
-# reusing or shipping the repo for your own environment.
-env = Environment("mario-claire")
+env = Environment(SCENARIO_ENV_NAME)
 
 bash_tool = BashTool()
 edit_tool = EditTool()
@@ -72,7 +71,7 @@ async def coding_task(
 
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-    answer = yield make_prompt(prompt)
+    yield make_prompt(prompt)
 
     graders = []
 
