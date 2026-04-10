@@ -52,6 +52,7 @@ class SourceContext:
 def generate_graders(
     ev: Evidence,
     output_dir: str | Path,
+    prompt_md: str | None = None,
     source_paths: list[str | Path] | None = None,
     test_paths: list[str | Path] | None = None,
 ) -> dict[str, str]:
@@ -67,7 +68,7 @@ def generate_graders(
     _write(paths.task_dir / "__init__.py", init_content)
     files[f"tasks/{paths.slug}/__init__.py"] = init_content
 
-    prompt_content = _load_prompt(paths.output_root, ev.project_name)
+    prompt_content = _load_prompt(paths.output_root, ev.project_name, prompt_md=prompt_md)
     _write(paths.task_dir / "prompt.md", prompt_content)
     files[f"tasks/{paths.slug}/prompt.md"] = prompt_content
 
@@ -214,11 +215,15 @@ def _collect_small_test_support_modules(
     return supported
 
 
-def _load_prompt(output_root: Path, project_name: str) -> str:
+def _load_prompt(output_root: Path, project_name: str, prompt_md: str | None = None) -> str:
+    if prompt_md is not None:
+        return prompt_md
     start_md = output_root / "start.md"
     if start_md.exists():
         return start_md.read_text(encoding="utf-8")
-    return f"# {project_name}\n\nBuild this library from scratch.\n"
+    raise ValueError(
+        f"Missing prompt markdown for '{project_name}'. Pass prompt_md explicitly or provide {start_md}."
+    )
 
 
 def _write_golden_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[str, str]:
@@ -356,12 +361,14 @@ def _generate_task_py(
         'if not os.environ.get("_HUD_DEV_CHILD"):',
         "    from hud import Environment",
         "",
-        '    # NOTE: `mario-claire` is the original local HUD environment name used while',
-        '    # developing this template. You MUST replace both hardcoded occurrences',
-        '    # below before reusing or shipping tasks for your own environment.',
-        '    ENV_NAME = os.environ.get("HUD_ENV_NAME", "mario-claire")',
+        "    def _require_env_name() -> str:",
+        '        env_name = os.environ.get("HUD_ENV_NAME", "").strip()',
+        "        if env_name:",
+        "            return env_name",
+        '        raise RuntimeError("HUD_ENV_NAME is required. Set it before running this task.")',
         "",
-        '    env = Environment("mario-claire")',
+        "    ENV_NAME = _require_env_name()",
+        "    env = Environment(ENV_NAME)",
         "    env.connect_hub(ENV_NAME)",
         "",
         "    TASK_DIR = Path(__file__).parent",

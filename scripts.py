@@ -1,10 +1,11 @@
 """CLI scripts for managing tasks."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
-from urllib import error, parse, request
+from urllib import error, request
 
 PROJECT_ROOT = str(Path(__file__).parent)
 if PROJECT_ROOT not in sys.path:
@@ -35,6 +36,25 @@ def _load_env() -> dict[str, str]:
     return env
 
 
+def _apply_local_env_defaults() -> None:
+    for key, value in _load_env().items():
+        os.environ.setdefault(key, value)
+
+
+def _required_env_name() -> str:
+    configured_env_name = os.environ.get("HUD_ENV_NAME", "").strip()
+    if not configured_env_name:
+        print("HUD_ENV_NAME is required. Set it in `.env` or your shell before syncing tasks.")
+        sys.exit(1)
+    return configured_env_name
+
+
+def _qualified_scenario_name(scenario_name: str, env_name: str) -> str:
+    if ":" in scenario_name:
+        return scenario_name
+    return f"{env_name}:{scenario_name}"
+
+
 def _api_json(method: str, *, api_url: str, api_key: str, path: str,
               payload: dict | list | None = None) -> Any:
     url = f"{api_url.rstrip('/')}{path}"
@@ -57,20 +77,22 @@ def _api_json(method: str, *, api_url: str, api_key: str, path: str,
 def sync_tasks():
     """Sync local task definitions to a HUD platform taskset.
 
-    Usage: uv run sync-tasks --taskset <name> --env <env-name>
+    Usage: uv run sync-tasks --taskset <name>
     """
     import argparse
 
     parser = argparse.ArgumentParser(description="Sync local tasks to a HUD taskset")
     parser.add_argument("--taskset", required=True, help="Taskset name on the platform")
-    parser.add_argument("--env", dest="env_name", required=True, help="Deployed environment name")
     args = parser.parse_args()
+
+    _apply_local_env_defaults()
+    env_name = _required_env_name()
 
     from hud.settings import settings as hud_settings
 
     api_key = hud_settings.api_key
     if not api_key:
-        print("HUD_API_KEY is required. Set via `hud set HUD_API_KEY=...`")
+        print("HUD_API_KEY is required. Set it in `.env` or via `hud set HUD_API_KEY=...`.")
         sys.exit(1)
     api_url = hud_settings.hud_api_url
 
@@ -83,10 +105,7 @@ def sync_tasks():
             print(f"Task '{task_name}' has no scenario")
             sys.exit(1)
 
-        task_env = getattr(task, "env", None)
-        env_class_name = getattr(task_env, "name", None) if task_env else None
-        if env_class_name and ":" not in scenario_name:
-            scenario_name = f"{env_class_name}:{scenario_name}"
+        scenario_name = _qualified_scenario_name(scenario_name, env_name)
 
         task_slug = task_ids.get(task_name)
         if not task_slug:
@@ -101,7 +120,7 @@ def sync_tasks():
 
         entry: dict[str, Any] = {
             "slug": task_slug,
-            "env": {"name": args.env_name},
+            "env": {"name": env_name},
             "scenario": scenario_name,
             "args": args_dict,
         }
@@ -111,7 +130,7 @@ def sync_tasks():
         upload_tasks.append(entry)
         print(f"  {task_name} -> {task_slug} ({scenario_name})")
 
-    print(f"\nUploading {len(upload_tasks)} task(s) to taskset '{args.taskset}' on env '{args.env_name}'...")
+    print(f"\nUploading {len(upload_tasks)} task(s) to taskset '{args.taskset}' on env '{env_name}'...")
 
     result = _api_json(
         "POST",

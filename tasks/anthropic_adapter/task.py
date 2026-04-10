@@ -9,12 +9,14 @@ from hud.types import MCPToolCall
 if not os.environ.get("_HUD_DEV_CHILD"):
     from hud import Environment
 
-    # NOTE: `mario-claire` is the original local HUD environment name used while
-    # developing this template. You MUST replace both hardcoded occurrences
-    # below before reusing or shipping tasks for your own environment.
-    ENV_NAME = os.environ.get("HUD_ENV_NAME", "mario-claire")
+    def _require_env_name() -> str:
+        env_name = os.environ.get("HUD_ENV_NAME", "").strip()
+        if env_name:
+            return env_name
+        raise RuntimeError("HUD_ENV_NAME is required. Set it before running this task.")
 
-    env = Environment("mario-claire")
+    ENV_NAME = _require_env_name()
+    env = Environment(ENV_NAME)
     env.connect_hub(ENV_NAME)
 
     TASK_DIR = Path(__file__).parent

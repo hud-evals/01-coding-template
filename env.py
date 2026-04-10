@@ -14,10 +14,18 @@ from hud.tools.coding import BashTool, EditTool
 
 logger = logging.getLogger(__name__)
 
-# NOTE: `mario-claire` is the original local HUD environment name used while
-# developing this template. You MUST replace this hardcoded value before
-# reusing or shipping the repo for your own environment.
-env = Environment("mario-claire")
+def _require_env_name() -> str:
+    env_name = os.environ.get("HUD_ENV_NAME", "").strip()
+    if env_name:
+        return env_name
+    raise RuntimeError(
+        "HUD_ENV_NAME is required. Set it in `.env` or your shell before running HUD commands."
+    )
+
+
+ENV_NAME = _require_env_name()
+
+env = Environment(ENV_NAME)
 
 bash_tool = BashTool()
 edit_tool = EditTool()

@@ -129,7 +129,7 @@ After the task validates cleanly:
 
 ```bash
 hud deploy .
-uv run sync-tasks --taskset <taskset-name> --env <env-name>
+uv run sync-tasks --taskset <taskset-name>
 ```
 
 What each command does:
@@ -148,7 +148,7 @@ You still need to redeploy when you change anything that affects the environment
 
 If you only changed task metadata or prompt content, sync may be enough. If you are unsure, run both.
 
-The current template and generated tasks still default to `HUD_ENV_NAME=mario-claire` because that was the original local development environment name used while building this repo. That placeholder is hardcoded in `env.py`, generated `task.py`, and current build metadata, and you MUST change it for your own environment before reusing or shipping this template.
+`HUD_ENV_NAME` is required. Set it to your deployed HUD environment name before building, evaluating, deploying, or syncing this template.
 
 For larger-scale usage patterns, see the HUD docs:
 [Running at Scale](https://docs.hud.ai/building/running-at-scale)
@@ -299,7 +299,7 @@ The validator checks prose against exact extracted facts. When it flags somethin
 | `HUD_API_KEY` | required for HUD commands | Used by `hud eval`, `hud deploy`, and sync |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
 | `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation. |
-| `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template and task wiring and MUST be changed for your own deployment. |
+| `HUD_ENV_NAME` | required | Deployed HUD environment name used by the template, generated tasks, and task sync. |
 | `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
 ## Short Version
@@ -307,7 +307,7 @@ The validator checks prose against exact extracted facts. When it flags somethin
 If you only remember one path, remember this:
 
 1. Generate with `uv run ast-pilot run ...`
-2. Copy the task into `tasks/...`
-3. Run `hud build .`
-4. Run `hud eval . integration_test --task-ids <slug> -y`
-5. Only then run model evals or deploy
+2. Run `hud build .`
+3. Run `hud eval . integration_test --task-ids <slug> -y`
+4. Run `hud deploy`
+5. Run `hud sync tasks <taskset name>`

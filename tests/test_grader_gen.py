@@ -149,6 +149,9 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("from target import *", support_shim)
             self.assertIn("SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
             self.assertIn("pythonpath = f\"/home/ubuntu/workspace:{SUPPORT_DIR}:$PYTHONPATH\"", task_py)
+            self.assertIn("HUD_ENV_NAME is required", task_py)
+            self.assertIn("env = Environment(ENV_NAME)", task_py)
+            self.assertNotIn("mario-claire", task_py)
             self.assertEqual(init_py, "")
 
     def test_bundle_handles_common_src_layout_import_paths(self) -> None:
