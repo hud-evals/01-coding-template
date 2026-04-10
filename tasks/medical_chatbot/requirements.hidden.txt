@@ -1,0 +1,6 @@
+pytest
+python-dotenv
+langchain-huggingface
+langchain-community
+langchain-groq
+faiss-cpu
