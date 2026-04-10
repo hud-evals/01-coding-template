@@ -23,8 +23,8 @@ A class that parses raw unstructured log arrays.
 A class that detects specific APT attack chains through sliding time windows.
 - Intializes with `time_window_minutes` integer. Uses a `timedelta` of that length.
 - Maintains state of events ingested via `ingest_event(event: SecurityEvent)`.
-- Implements `detect_brute_force()`: Detects 5 or more failed "AUTH" attempts from the exact same source IP, followed by a "SUCCESS" status "AUTH" action to the same or different target, all strictly within the trailing time window limit relative to the exact `SUCCESS` timestamp. Returns an independent `Alert` with `alert_type="BRUTE_FORCE_SUCCESS"` and `severity="CRITICAL"`. The alert events must include the failures and the success event.
-- Implements `detect_lateral_movement()`: Target of a successful "AUTH" initiates an "SSH" with "SUCCESS" status to another host strictly within the `time_window_minutes` timeframe relative to the exact `AUTH` timestamp. Returns an `Alert` with `alert_type="LATERAL_MOVEMENT"`, `severity="HIGH"`. Include both events.
+- Implements `detect_brute_force()`: Detects 5 or more failed "AUTH" attempts from the exact same source IP, followed by a "SUCCESS" status "AUTH" action to the same or different target, all strictly within the trailing time window limit relative to the exact `SUCCESS` timestamp. Returns a list of `Alert` objects (can be empty), with `alert_type="BRUTE_FORCE_SUCCESS"` and `severity="CRITICAL"`. The alert events must include the failures and the success event.
+- Implements `detect_lateral_movement()`: Target of a successful "AUTH" initiates an "SSH" with "SUCCESS" status to another host strictly within the `time_window_minutes` timeframe relative to the exact `AUTH` timestamp. Returns a list of `Alert` objects (can be empty), with `alert_type="LATERAL_MOVEMENT"`, `severity="HIGH"`. Include both the initial successful AUTH and the subsequent SSH event.
 
 ### 4. `ContainmentGraph`
 A class that utilizes a Directed Graph representation of a network. 

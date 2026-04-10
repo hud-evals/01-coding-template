@@ -12,7 +12,10 @@ Initialize three tables:
 - `products`: `id INTEGER PRIMARY KEY, name TEXT, stock INTEGER, price REAL`
 - `comments`: `id INTEGER PRIMARY KEY, product_id INTEGER, comment TEXT`
 
-Pre-seed the database with initial records during `__init__`.
+- **CRITICAL:** Pre-seed the database exactly like this during `__init__`:
+  - `user ('admin', 'supersecret', 1000.0)`
+  - `user ('user1', 'pass123', 50.0)`
+  - `product ('laptop', 10, 800.0)`
 
 ### Methods to Implement
 
