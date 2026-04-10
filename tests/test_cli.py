@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ast_pilot.cli import _promote_generated_task, cmd_bundle, cmd_run
-from ast_pilot.evidence import Evidence
+from ast_pilot.evidence import Evidence, ModuleInfo, TestEvidence as EvidenceTestRecord
 from ast_pilot.validator import ValidationIssue, ValidationResult
 
 
@@ -145,6 +145,15 @@ class CliTests(unittest.TestCase):
             evidence_path.write_text("{}", encoding="utf-8")
             prompt_path = root / "start.md"
             prompt_path.write_text("# demo-task\n\nBuild it.\n", encoding="utf-8")
+            source_path = root / "demo.py"
+            source_path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+            test_path = root / "test_demo.py"
+            test_path.write_text("def test_demo():\n    assert True\n", encoding="utf-8")
+            ev = Evidence(
+                project_name="demo-task",
+                source_files=[ModuleInfo(path=str(source_path), module_name="demo")],
+                tests=[EvidenceTestRecord(test_file=str(test_path), test_name="test_demo")],
+            )
 
             args = argparse.Namespace(
                 evidence=str(evidence_path),
@@ -153,7 +162,7 @@ class CliTests(unittest.TestCase):
             )
 
             with (
-                patch("ast_pilot.evidence.Evidence.load", return_value=Evidence(project_name="demo-task")),
+                patch("ast_pilot.evidence.Evidence.load", return_value=ev),
                 patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                 patch("ast_pilot.grader_gen.generate_graders", return_value={}) as generate_graders,
                 patch("ast_pilot.cli._promote_generated_task", return_value=None),
@@ -161,9 +170,11 @@ class CliTests(unittest.TestCase):
                 cmd_bundle(args)
 
             generate_graders.assert_called_once_with(
-                Evidence(project_name="demo-task"),
+                ev,
                 output_dir=root / "bundle-out",
                 prompt_md="# demo-task\n\nBuild it.\n",
+                source_paths=[str(source_path)],
+                test_paths=[str(test_path)],
             )
 
 

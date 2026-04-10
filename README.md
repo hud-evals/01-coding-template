@@ -10,9 +10,12 @@ For the end-to-end vendor workflow, task generation process, validation rules, d
 
 ```bash
 uv sync
-cp .env.example .env  # add your API keys
+cp .env.example .env  # add your API keys and HUD_ENV_NAME
+source .env
 
 hud build .
+hud deploy . -n "$HUD_ENV_NAME"
+hud eval . integration_test --all -y
 hud eval . claude --all -y --max-steps 30
 ```
 
@@ -25,7 +28,7 @@ tasks/my_task/
 ├── __init__.py      # from .task import *
 ├── task.py          # Task definition (prompt, grading, validation)
 ├── prompt.md        # Long markdown instructions for the agent
-└── tests/           # Hidden test files (copied to /home/root/tests/ at build time)
+└── tests/           # Hidden test files used for grading
     └── test_*.py
 ```
 
@@ -36,25 +39,27 @@ import os
 from pathlib import Path
 from hud.eval.task import Task
 from hud.types import MCPToolCall
+from task_bootstrap import require_hud_env_name
 
 if not os.environ.get("_HUD_DEV_CHILD"):
     from hud import Environment
 
-    IMAGE = os.environ.get("HUD_IMAGE", "01-coding-template:latest")
-    env = Environment("coding")
-    env.connect_image(IMAGE)
-
+    SCENARIO_ID = "ast-pilot:coding-task"
     TASK_DIR = Path(__file__).parent
+    ENV_NAME = require_hud_env_name(TASK_DIR.parents[1] / ".env")
+
+    env = Environment(ENV_NAME)
+    env.connect_hub(ENV_NAME)
 
     task = Task(
         env=env,
-        scenario="coding-task",
+        scenario=SCENARIO_ID,
         args={
             "prompt": (TASK_DIR / "prompt.md").read_text(),
             "bash_checks": [
                 {
                     "name": "tests_pass",
-                    "command": "cd /home/ubuntu/workspace && python -m pytest /home/root/tests/my_task/ -v",
+                    "command": "...generated pytest command...",
                     "weight": 1.0,
                 },
             ],
@@ -76,13 +81,15 @@ Long markdown file describing the full library/API the agent should build — th
 
 Grading uses `BashGrader` from the HUD SDK. Each `bash_check` runs a shell command; exit code 0 = pass, non-zero = fail.
 
-The typical pattern: copy tests from the original repo into `tasks/<name>/tests/`, then grade with `python -m pytest /home/root/tests/<name>/`.
+The typical pattern: carry hidden tests inside `tasks/<name>/tests/`, then let the generated `task.py` inject and run them during grading.
 
 ### Validation
 
 `task.validation` defines MCPToolCall steps that produce the golden solution. Used by `hud eval . integration_test --all -y` to verify:
 - **golden_pass**: apply the golden solution, then run graders — should score 1.0
 - **baseline_fail**: run graders on the blank workspace — should score 0.0
+
+For this template's hub-connected tasks, `integration_test` should be treated as validation against the deployed HUD environment, not just the last local image you built.
 
 ## Using Private Repos
 
@@ -100,8 +107,9 @@ The repo is cloned to `/home/root/golden` (invisible to the agent). Use it for e
 
 ```
 01-coding-template/
-├── env.py           # Environment: SDK tools, coding-task scenario
+├── env.py           # Environment: SDK tools, shared ast-pilot scenario
 ├── cli.py           # MCP server entry point
+├── task_bootstrap.py # Local .env loading for generated tasks
 ├── grading/         # SDK grader re-exports
 ├── tasks/
 │   ├── __init__.py  # Auto-discovery
@@ -116,9 +124,9 @@ The repo is cloned to `/home/root/golden` (invisible to the agent). Use it for e
 ## Commands
 
 ```bash
-hud build .                                    # Build the Docker image
+hud build .                                    # Build and sanity-check the local image
+hud deploy . -n "$HUD_ENV_NAME"                # Deploy/update the HUD environment
+hud eval . integration_test --all -y           # Validate tasks against the deployed env
 hud eval . claude --all -y --max-steps 30      # Run all tasks with Claude
-hud eval . integration_test --all -y           # Validate golden solutions
-hud deploy .                                   # Deploy to HUD platform
-hud sync tasks my-taskset-name                 # Sync tasks to a taskset
+hud sync tasks <taskset-name>                  # Sync tasks to a taskset
 ```

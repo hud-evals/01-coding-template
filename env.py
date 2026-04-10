@@ -13,19 +13,10 @@ from hud import Environment
 from hud.tools.coding import BashTool, EditTool
 
 logger = logging.getLogger(__name__)
+SCENARIO_ENV_NAME = "ast-pilot"
+SCENARIO_ID = f"{SCENARIO_ENV_NAME}:coding-task"
 
-def _require_env_name() -> str:
-    env_name = os.environ.get("HUD_ENV_NAME", "").strip()
-    if env_name:
-        return env_name
-    raise RuntimeError(
-        "HUD_ENV_NAME is required. Set it in `.env` or your shell before running HUD commands."
-    )
-
-
-ENV_NAME = _require_env_name()
-
-env = Environment(ENV_NAME)
+env = Environment(SCENARIO_ENV_NAME)
 
 bash_tool = BashTool()
 edit_tool = EditTool()
@@ -80,7 +71,7 @@ async def coding_task(
 
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-    answer = yield make_prompt(prompt)
+    yield make_prompt(prompt)
 
     graders = []
 

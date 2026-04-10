@@ -55,10 +55,18 @@ def cmd_bundle(args: argparse.Namespace) -> None:
     out_dir, cleanup_after_success = _prepare_bundle_root(args.output, ev.project_name)
     prompt_path = Path(args.prompt) if args.prompt else Path(args.evidence).with_name("start.md")
     prompt_md = _load_validated_prompt(ev, prompt_path)
+    source_paths = [mod.path for mod in ev.source_files]
+    test_paths = sorted({test.test_file for test in ev.tests})
 
     promoted_to: Path | None = None
     try:
-        files = generate_graders(ev, output_dir=out_dir, prompt_md=prompt_md)
+        files = generate_graders(
+            ev,
+            output_dir=out_dir,
+            prompt_md=prompt_md,
+            source_paths=source_paths,
+            test_paths=test_paths,
+        )
         print(f"Generated {len(files)} files in {out_dir}/:")
         for path in sorted(files):
             print(f"  {path}")

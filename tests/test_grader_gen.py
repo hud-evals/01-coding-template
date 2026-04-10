@@ -1,15 +1,78 @@
 from __future__ import annotations
 
+import importlib.util
+import os
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from ast_pilot.evidence import Evidence, ModuleInfo
 from ast_pilot.grader_gen import generate_graders
 from ast_pilot.scanner import scan
+
+
+def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None = None):
+    module_name = "_generated_task_under_test"
+    task_path = task_dir / "task.py"
+
+    class FakeEnvironment:
+        def __init__(self, name: str):
+            self.name = name
+            self.connected = []
+
+        def connect_hub(self, env_name: str) -> None:
+            self.connected.append(env_name)
+
+    class FakeTask:
+        def __init__(self, env, scenario: str, args: dict):
+            self.env = env
+            self.scenario = scenario
+            self.args = args
+            self.validation = []
+            self.slug = None
+
+    class FakeMCPToolCall:
+        def __init__(self, name: str, arguments: dict):
+            self.name = name
+            self.arguments = arguments
+
+    fake_hud = types.ModuleType("hud")
+    fake_hud.__path__ = []
+    fake_hud.Environment = FakeEnvironment
+
+    fake_hud_eval = types.ModuleType("hud.eval")
+    fake_hud_eval.__path__ = []
+
+    fake_hud_eval_task = types.ModuleType("hud.eval.task")
+    fake_hud_eval_task.Task = FakeTask
+
+    fake_hud_types = types.ModuleType("hud.types")
+    fake_hud_types.MCPToolCall = FakeMCPToolCall
+
+    spec = importlib.util.spec_from_file_location(module_name, task_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+
+    with patch.dict(os.environ, env_vars or {}, clear=True):
+        with patch.dict(
+            sys.modules,
+            {
+                "hud": fake_hud,
+                "hud.eval": fake_hud_eval,
+                "hud.eval.task": fake_hud_eval_task,
+                "hud.types": fake_hud_types,
+            },
+            clear=False,
+        ):
+            sys.modules.pop(module_name, None)
+            spec.loader.exec_module(module)
+            return module
 
 
 class GraderGenTests(unittest.TestCase):
@@ -148,12 +211,34 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn('return "cached"', support_prompt_caching)
             self.assertIn('return "sentinel"', support_other_module)
             self.assertIn("from target import *", support_shim)
-            self.assertIn("SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
-            self.assertIn("pythonpath = f\"/home/ubuntu/workspace:{SUPPORT_DIR}:$PYTHONPATH\"", task_py)
+            self.assertIn('IMAGE_TASK_DIR = Path("/mcp_server/tasks") / TASK_DIR.name', task_py)
+            self.assertIn("LEGACY_SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
+            self.assertIn("from task_bootstrap import require_hud_env_name", task_py)
+            self.assertIn("ENV_NAME = require_hud_env_name(", task_py)
+            self.assertIn('SCENARIO_ID = "ast-pilot:coding-task"', task_py)
+            self.assertIn('BUNDLED_SUPPORT_DIR = IMAGE_TASK_DIR / "support"', task_py)
+            self.assertIn('RUNTIME_ROOT = Path("/tmp/ast_pilot_task_runtime") / TASK_DIR.name', task_py)
+            self.assertIn('WORKSPACE_DIR = "/home/ubuntu/workspace"', task_py)
+            self.assertIn('LOCAL_HIDDEN_REQUIREMENTS = TASK_DIR / "requirements.hidden.txt"', task_py)
+            self.assertIn('BUNDLED_HIDDEN_REQUIREMENTS = IMAGE_TASK_DIR / "requirements.hidden.txt"', task_py)
+            self.assertIn("def _prepare_hidden_runtime(test_file: str, runtime_support_dir: Path) -> str:", task_py)
+            self.assertIn('runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"', task_py)
+            self.assertIn("prepare = _prepare_hidden_runtime(test_file, runtime_support_dir)", task_py)
+            self.assertIn('pythonpath = f"{WORKSPACE_DIR}:{runtime_support_dir}:$PYTHONPATH"', task_py)
             self.assertIn("HUD_ENV_NAME is required", task_py)
             self.assertIn("env = Environment(ENV_NAME)", task_py)
             self.assertNotIn("mario-claire", task_py)
             self.assertEqual(init_py, "")
+
+            generated_task_dir = output_dir / "tasks" / "target-task"
+            (output_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
+            module = _load_generated_task_module(generated_task_dir)
+            generated_command = module.task.args["bash_checks"][0]["command"]
+            self.assertEqual(module.task.env.name, "dotenv-env")
+            self.assertEqual(module.task.scenario, "ast-pilot:coding-task")
+            self.assertIn("/mcp_server/tasks/target-task/support", generated_command)
+            self.assertIn("/mcp_server/tasks/target-task/requirements.hidden.txt", generated_command)
+            self.assertNotIn(str(root), generated_command)
 
     def test_bundle_handles_common_src_layout_import_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -312,6 +397,21 @@ class GraderGenTests(unittest.TestCase):
                     prompt_md="# target-task\n",
                     source_paths=[source_path],
                     test_paths=[test_path],
+                )
+
+    def test_bundle_fails_when_evidence_source_path_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ev = Evidence(
+                project_name="target-task",
+                source_files=[ModuleInfo(path=str(root / "missing.py"), module_name="missing")],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Missing source path"):
+                generate_graders(
+                    ev,
+                    output_dir=root / "output",
+                    prompt_md="# target-task\n",
                 )
 
 

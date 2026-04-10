@@ -221,7 +221,8 @@ def _check_field_counts(ev: Evidence, md: str, md_lines: list[str], result: Vali
                 continue
             for i, line in enumerate(md_lines):
                 m = re.search(r"(\d+)\s+fields?", line)
-                if m and cls.name.lower() in md_lines[max(0, i - 2) : i + 1][0].lower() if md_lines[max(0, i - 2) : i + 1] else False:
+                window = md_lines[max(0, i - 2) : i + 1]
+                if m and any(cls.name.lower() in candidate.lower() for candidate in window):
                     claimed = int(m.group(1))
                     if claimed != actual_fields:
                         result.issues.append(

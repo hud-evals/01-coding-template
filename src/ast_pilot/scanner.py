@@ -16,6 +16,12 @@ from .evidence import (
     Parameter,
     TestEvidence,
 )
+from .repo_support import find_repo_context
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python 3.10 fallback
+    tomllib = None
 
 
 def scan(
@@ -27,6 +33,7 @@ def scan(
     """Scan source files, optional test files, and docs into an Evidence store."""
 
     ev = Evidence(project_name=project_name)
+    ev.python_version = _detect_python_version(source_paths)
 
     for p in source_paths:
         mod = _scan_module(Path(p))
@@ -46,6 +53,19 @@ def scan(
     return ev
 
 
+def _detect_python_version(source_paths: list[str | Path]) -> str:
+    repo = find_repo_context(source_paths)
+    if repo is not None and repo.pyproject_path is not None and tomllib is not None:
+        try:
+            data = tomllib.loads(repo.pyproject_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        requires_python = data.get("project", {}).get("requires-python")
+        if isinstance(requires_python, str) and requires_python.strip():
+            return requires_python.strip()
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
 def _scan_module(path: Path) -> Optional[ModuleInfo]:
     """Parse a single .py file and extract its structure."""
 
@@ -55,8 +75,8 @@ def _scan_module(path: Path) -> Optional[ModuleInfo]:
     source = path.read_text(encoding="utf-8", errors="replace")
     try:
         tree = ast.parse(source, filename=str(path))
-    except SyntaxError:
-        return None
+    except SyntaxError as exc:
+        raise ValueError(f"Failed to parse source file {path}: {exc.msg}") from exc
 
     lines = source.splitlines()
     mod = ModuleInfo(
@@ -360,8 +380,8 @@ def _scan_tests(path: Path, known_symbols: set[str]) -> list[TestEvidence]:
     source = path.read_text(encoding="utf-8", errors="replace")
     try:
         tree = ast.parse(source, filename=str(path))
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        raise ValueError(f"Failed to parse test file {path}: {exc.msg}") from exc
 
     results: list[TestEvidence] = []
 

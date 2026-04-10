@@ -17,6 +17,7 @@ uv.lock
 .mypy_cache/
 .hud/
 .hud_eval.toml
+hud.lock.yaml
 
 output/
 ast_test/

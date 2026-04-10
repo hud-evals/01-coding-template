@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _default_python_version() -> str:
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 @dataclass
@@ -78,7 +83,7 @@ class Evidence:
     tests: list[TestEvidence] = field(default_factory=list)
     readme_sections: dict[str, str] = field(default_factory=dict)
     total_loc: int = 0
-    python_version: str = "3.10"
+    python_version: str = field(default_factory=_default_python_version)
     dependencies: list[str] = field(default_factory=list)
 
     def all_public_symbols(self) -> list[str]:
@@ -121,7 +126,7 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
     ev = Evidence(
         project_name=d.get("project_name", ""),
         total_loc=d.get("total_loc", 0),
-        python_version=d.get("python_version", "3.10"),
+        python_version=d.get("python_version", _default_python_version()),
         dependencies=d.get("dependencies", []),
         readme_sections=d.get("readme_sections", {}),
     )
