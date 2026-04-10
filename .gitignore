@@ -22,8 +22,3 @@ output/
 ast_test/
 evidence*.json
 *.lock
-claire-paper.pdf
-
-# Source repos used for task generation
-hermes-agent/
-NL2RepoBench/

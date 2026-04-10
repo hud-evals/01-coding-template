@@ -122,6 +122,7 @@ class GraderGenTests(unittest.TestCase):
             files = generate_graders(
                 ev,
                 output_dir=output_dir,
+                prompt_md="# target-task\n",
                 source_paths=[source_path],
                 test_paths=[test_path],
             )
@@ -228,6 +229,7 @@ class GraderGenTests(unittest.TestCase):
             files = generate_graders(
                 ev,
                 output_dir=root / "output",
+                prompt_md="# target-task\n",
                 source_paths=[source_path],
                 test_paths=[test_path],
             )
@@ -307,6 +309,7 @@ class GraderGenTests(unittest.TestCase):
                 generate_graders(
                     ev,
                     output_dir=root / "output",
+                    prompt_md="# target-task\n",
                     source_paths=[source_path],
                     test_paths=[test_path],
                 )
