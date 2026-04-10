@@ -6,6 +6,7 @@ import ast
 import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -38,6 +39,7 @@ _DOTTED_REF_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\.]*")
 @dataclass(frozen=True)
 class RepoContext:
     root: Path
+    import_roots: tuple[Path, ...]
     module_index: dict[str, Path]
     pyproject_path: Path | None
 
@@ -61,10 +63,12 @@ def find_repo_context(paths: Sequence[str | Path]) -> RepoContext | None:
         return None
 
     root = roots[0]
-    module_index = build_module_index(root)
+    import_roots = discover_import_roots(root)
+    module_index = build_module_index(root, import_roots=import_roots)
     pyproject_path = root / "pyproject.toml"
     return RepoContext(
         root=root,
+        import_roots=import_roots,
         module_index=module_index,
         pyproject_path=pyproject_path if pyproject_path.exists() else None,
     )
@@ -77,34 +81,141 @@ def iter_python_files(root: Path) -> Iterator[Path]:
         yield path
 
 
-def build_module_index(root: Path) -> dict[str, Path]:
+def build_module_index(root: Path, import_roots: Sequence[Path] | None = None) -> dict[str, Path]:
     index: dict[str, Path] = {}
+    resolved_roots = tuple(import_roots or discover_import_roots(root))
     for path in iter_python_files(root):
-        module_name = module_name_from_path(path, root)
-        if module_name:
-            index[module_name] = path
+        for module_name in module_names_from_path(path, root, import_roots=resolved_roots):
+            index.setdefault(module_name, path)
     return index
 
 
-def module_name_from_path(path: str | Path, root: str | Path) -> str | None:
+def module_name_from_path(
+    path: str | Path,
+    root: str | Path,
+    import_roots: Sequence[Path] | None = None,
+) -> str | None:
+    module_names = module_names_from_path(path, root, import_roots=import_roots)
+    return module_names[0] if module_names else None
+
+
+def module_names_from_path(
+    path: str | Path,
+    root: str | Path,
+    import_roots: Sequence[Path] | None = None,
+) -> list[str]:
     path_obj = Path(path).resolve()
     root_obj = Path(root).resolve()
     try:
-        relative = path_obj.relative_to(root_obj)
+        repo_relative = path_obj.relative_to(root_obj)
     except ValueError:
-        return None
+        return []
 
-    if path_obj.suffix != ".py" or _is_ignored_path(relative):
-        return None
+    if path_obj.suffix != ".py" or _is_ignored_path(repo_relative):
+        return []
 
-    parts = list(relative.with_suffix("").parts)
-    if not parts:
-        return None
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    if not parts:
-        return None
-    return ".".join(parts)
+    names: list[str] = []
+    for import_root in tuple(import_roots or discover_import_roots(root_obj)):
+        try:
+            relative = path_obj.relative_to(import_root)
+        except ValueError:
+            continue
+
+        parts = list(relative.with_suffix("").parts)
+        if not parts:
+            continue
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts:
+            continue
+
+        module_name = ".".join(parts)
+        if module_name not in names:
+            names.append(module_name)
+
+    return names
+
+
+def module_path_from_name(module_name: str, original_path: Path) -> Path:
+    if original_path.name == "__init__.py":
+        return Path(*module_name.split(".")) / "__init__.py"
+    return Path(*module_name.split(".")).with_suffix(".py")
+
+
+def discover_import_roots(root: Path) -> tuple[Path, ...]:
+    return _discover_import_roots_cached(str(root.resolve()))
+
+
+@lru_cache(maxsize=None)
+def _discover_import_roots_cached(root_str: str) -> tuple[Path, ...]:
+    root = Path(root_str)
+    roots: list[Path] = []
+
+    def add(candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        candidate = candidate.resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            return
+        if candidate == root:
+            return
+        if candidate not in roots:
+            roots.append(candidate)
+
+    pyproject_path = root / "pyproject.toml"
+    if pyproject_path.exists() and tomllib is not None:
+        try:
+            data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        _collect_configured_import_roots(root, data, add)
+
+    add(root / "src")
+    add(root / "lib")
+
+    roots.append(root)
+    return tuple(roots)
+
+
+def _collect_configured_import_roots(root: Path, data: dict, add_root) -> None:
+    tool = data.get("tool", {})
+
+    setuptools = tool.get("setuptools", {})
+    package_dir = setuptools.get("package-dir", {})
+    if isinstance(package_dir, dict):
+        for value in package_dir.values():
+            if isinstance(value, str) and value:
+                add_root(root / value)
+
+    setuptools_packages = setuptools.get("packages", {})
+    find_config = setuptools_packages.get("find", {}) if isinstance(setuptools_packages, dict) else {}
+    where_entries = find_config.get("where", [])
+    if isinstance(where_entries, list):
+        for entry in where_entries:
+            if isinstance(entry, str) and entry:
+                add_root(root / entry)
+
+    poetry = tool.get("poetry", {})
+    poetry_packages = poetry.get("packages", [])
+    if isinstance(poetry_packages, list):
+        for entry in poetry_packages:
+            if not isinstance(entry, dict):
+                continue
+            from_dir = entry.get("from")
+            if isinstance(from_dir, str) and from_dir:
+                add_root(root / from_dir)
+
+    hatch = tool.get("hatch", {})
+    hatch_build = hatch.get("build", {})
+    hatch_targets = hatch_build.get("targets", {})
+    wheel_target = hatch_targets.get("wheel", {}) if isinstance(hatch_targets, dict) else {}
+    packages = wheel_target.get("packages", [])
+    if isinstance(packages, list):
+        for entry in packages:
+            if not isinstance(entry, str) or not entry:
+                continue
+            package_path = Path(entry)
+            add_root(root / package_path.parent if package_path.parent != Path(".") else root)
 
 
 def collect_internal_imports(path: str | Path, ctx: RepoContext) -> set[str]:
