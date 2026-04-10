@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from .repo_support import (
     find_repo_context,
     load_project_dependencies,
     module_name_from_path,
+    module_path_from_name,
     reference_to_module,
     resolve_from_module,
     resolve_module_candidates,
@@ -24,6 +26,7 @@ from .repo_support import (
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 SUPPORT_ROOT = "/opt/ast_pilot_support"
 SMALL_TEST_SUPPORT_MAX_LINES = 400
+ALLOW_UNSUPPORTED_TEST_REFS_ENV = "AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"
 
 
 @dataclass(frozen=True)
@@ -117,16 +120,7 @@ def _build_source_context(
     )
     resolved_tests = tuple(Path(path).resolve() for path in (test_paths or []) if Path(path).exists())
     repo = find_repo_context([*resolved_sources, *resolved_tests])
-
-    target_module_map: dict[str, str] = {}
-    if repo is not None:
-        for source_path in resolved_sources:
-            module_name = module_name_from_path(source_path, repo.root)
-            if module_name:
-                target_module_map[module_name] = source_path.stem
-    else:
-        for source_path in resolved_sources:
-            target_module_map[source_path.stem] = source_path.stem
+    target_module_map = _build_target_module_map(resolved_sources, repo)
 
     support_modules = frozenset(_build_support_module_closure(resolved_sources, repo, set(target_module_map)))
     if repo is not None and resolved_tests:
@@ -260,7 +254,7 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
         else:
             content = original_path.read_text(encoding="utf-8", errors="replace")
 
-        relative_path = original_path.relative_to(repo.root)
+        relative_path = module_path_from_name(module_name, original_path)
         destination = paths.support_dir / relative_path
         _write(destination, content)
         files[f"tasks/{paths.slug}/support/{relative_path.as_posix()}"] = content
@@ -289,6 +283,7 @@ def _write_test_files(
     files: list[str] = []
     if source_ctx.test_paths:
         available_modules = source_ctx.support_modules | set(source_ctx.target_module_map)
+        allow_unsupported_test_refs = _allow_unsupported_test_refs()
         for test_path in source_ctx.test_paths:
             original = test_path.read_text(encoding="utf-8", errors="replace")
             rewritten = _rewrite_test_imports(original, source_ctx.target_module_map)
@@ -298,6 +293,7 @@ def _write_test_files(
                 test_path=test_path,
                 repo=source_ctx.repo,
                 available_modules=available_modules,
+                allow_downgrades=allow_unsupported_test_refs,
             )
             rewritten = _prepend_workspace_syspath(rewritten)
             destination = paths.tests_dir / test_path.name
@@ -478,6 +474,7 @@ def _guard_unsupported_test_refs(
     test_path: Path,
     repo: RepoContext | None,
     available_modules: set[str],
+    allow_downgrades: bool,
 ) -> str:
     if repo is None:
         return rewritten_content
@@ -497,13 +494,16 @@ def _guard_unsupported_test_refs(
             continue
         module_level_refs.update(_collect_internal_refs_from_node(node, current_module, repo))
 
-    guarded = rewritten_content
     unsupported_module_refs = sorted(ref for ref in module_level_refs if ref not in available_modules)
-    if unsupported_module_refs:
-        guarded = _insert_module_level_skip(guarded, unsupported_module_refs)
-
     marks: list[tuple[int, str]] = []
     handled_test_lines: set[int] = set()
+    failures: list[str] = []
+
+    if unsupported_module_refs:
+        failures.append(
+            f"{test_path.name} module scope depends on unsupported internal module(s): "
+            f"{', '.join(unsupported_module_refs)}"
+        )
 
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -525,6 +525,10 @@ def _guard_unsupported_test_refs(
             unsupported = sorted((refs | unsupported_helpers) - available_modules)
             if unsupported:
                 marks.append((test_method.lineno, _unsupported_reason(unsupported)))
+                failures.append(
+                    f"{test_path.name}:{test_method.lineno} ({node.name}.{test_method.name}) depends on "
+                    f"unsupported internal module(s): {', '.join(unsupported)}"
+                )
                 handled_test_lines.add(test_method.lineno)
 
     for node in ast.walk(tree):
@@ -536,6 +540,26 @@ def _guard_unsupported_test_refs(
         unsupported = sorted(ref for ref in refs if ref not in available_modules)
         if unsupported:
             marks.append((node.lineno, _unsupported_reason(unsupported)))
+            failures.append(
+                f"{test_path.name}:{node.lineno} ({node.name}) depends on unsupported internal module(s): "
+                f"{', '.join(unsupported)}"
+            )
+
+    if failures and not allow_downgrades:
+        joined = "\n".join(f"  - {failure}" for failure in failures)
+        raise ValueError(
+            "Hidden tests reference unsupported internal modules.\n"
+            "Refusing to silently inject skip/xfail markers.\n"
+            f"{joined}\n"
+            f"Set {ALLOW_UNSUPPORTED_TEST_REFS_ENV}=1 to allow downgraded coverage intentionally."
+        )
+
+    guarded = rewritten_content
+    if unsupported_module_refs:
+        guarded = _insert_module_level_skip(guarded, unsupported_module_refs)
+
+    if failures and allow_downgrades:
+        guarded = _prepend_unsupported_test_warning(guarded, failures)
 
     return _insert_function_marks(guarded, marks)
 
@@ -589,6 +613,19 @@ def _insert_function_marks(content: str, marks: list[tuple[int, str]]) -> str:
     return "\n".join(lines)
 
 
+def _prepend_unsupported_test_warning(content: str, failures: list[str]) -> str:
+    lines = content.splitlines()
+    insert_at = _find_header_insert_at(lines)
+    warning_lines = [
+        "# WARNING: ast-pilot downgraded unsupported hidden-test coverage.",
+        f"# Set {ALLOW_UNSUPPORTED_TEST_REFS_ENV}=0 or unset it to fail instead.",
+    ]
+    for failure in failures[:5]:
+        warning_lines.append(f"# {failure}")
+    warning_lines.append("")
+    return "\n".join(lines[:insert_at] + warning_lines + lines[insert_at:])
+
+
 def _prepend_workspace_syspath(content: str) -> str:
     if WORKSPACE_DIR in content and "sys.path.insert" in content:
         return content
@@ -640,6 +677,46 @@ def _primary_module_name(ev: Evidence, source_ctx: SourceContext) -> str:
     if ev.source_files:
         return Path(ev.source_files[0].path).stem
     return _pkg_name(ev.project_name)
+
+
+def _build_target_module_map(
+    resolved_sources: tuple[Path, ...],
+    repo: RepoContext | None,
+) -> dict[str, str]:
+    module_pairs: list[tuple[str, Path]] = []
+    stem_to_paths: dict[str, list[Path]] = {}
+
+    for source_path in resolved_sources:
+        if repo is not None:
+            module_name = module_name_from_path(source_path, repo.root, import_roots=repo.import_roots)
+        else:
+            module_name = source_path.stem
+        if not module_name:
+            continue
+        module_pairs.append((module_name, source_path))
+        stem_to_paths.setdefault(source_path.stem, []).append(source_path)
+
+    duplicates = {
+        stem: paths
+        for stem, paths in stem_to_paths.items()
+        if len(paths) > 1
+    }
+    if duplicates:
+        rendered = ", ".join(
+            f"{stem} -> {', '.join(str(path) for path in paths)}"
+            for stem, paths in sorted(duplicates.items())
+        )
+        raise ValueError(
+            "Selected source files would collapse to the same workspace module name. "
+            f"Choose modules with distinct filenames or generate separate tasks: {rendered}"
+        )
+
+    return {module_name: source_path.stem for module_name, source_path in module_pairs}
+
+
+def _allow_unsupported_test_refs() -> bool:
+    raw = os.environ.get(ALLOW_UNSUPPORTED_TEST_REFS_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _unsupported_reason(unsupported_modules: list[str]) -> str:

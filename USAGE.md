@@ -2,47 +2,44 @@
 
 `ast-pilot` turns a Python module and its pytest coverage into a 0-to-1 HUD coding task. The generated task gives an agent a long-form spec, an empty workspace, and hidden tests that grade the implementation.
 
+It covers the full path from source module to shippable HUD task.
+
 The agent only sees the prompt. It does not see the hidden tests, the golden solution, or the hidden support tree used during validation.
 
-## Current Repo Layout
+## What This Directory Is
 
-This repository currently contains two things at once:
+Treat this directory as the working root for this guide.
 
-- the generator code at the repo root
-- the deployable HUD environment under `01-coding-template/`
+It contains both the task generator and the HUD environment that runs the generated tasks:
 
-If you are working in this repository, the rule is:
+```text
+.
+├── src/ast_pilot/      # scanner, renderer, validator, and bundle generator
+├── tasks/              # importable HUD task packages (`tasks/<pkg>/task.py`)
+├── env.py              # HUD environment and `coding-task` scenario
+├── build_support.py    # hidden support staging during image builds
+├── scripts.py          # helper for syncing local tasks to a HUD taskset
+├── Dockerfile.hud      # image definition used by `hud build` / `hud deploy`
+└── USAGE.md            # this file
+```
 
-1. From the repo root, run `ast-pilot` to generate `output/<slug>/`.
-2. Copy the generated task into `01-coding-template/tasks/...`.
-3. `cd 01-coding-template` and run `hud build`, `hud eval`, `hud deploy`, or `hud sync tasks`.
+The mental model is simple:
 
-So in this repo specifically:
+- run `ast-pilot` to generate or update a task package in `tasks/<task_package>/`
+- review the generated task package in `tasks/`
+- build, validate, deploy, and sync from this directory
 
-- generate from the repo root
-- validate and ship from `01-coding-template/`
-
-## Use The Template
-
-If you are a vendor setting this up in a new repo, start from `01-coding-template/`.
-
-Once you copy `01-coding-template/` into its own repo, that new repo root becomes the only working directory. In that setup, there is no split between "repo root" and "template directory" anymore.
-
-That directory is the real HUD environment template. It contains:
-
-- the Docker image definition
-- the HUD scenario and MCP server entrypoint
-- the task discovery logic
-- the task packages that get built, validated, deployed, and synced
+Open a shell in this directory and follow the commands below exactly as written.
 
 ## Setup
 
-In this repository, run this from the repo root. If you copied `01-coding-template/` into its own repo, run it from that new repo root:
+Run everything below from this directory:
 
 ```bash
 uv sync
 cp .env.example .env
 # Fill in ANTHROPIC_API_KEY and HUD_API_KEY
+source .env
 ```
 
 You only need `ANTHROPIC_API_KEY` for LLM-generated prose. You need `HUD_API_KEY` for `hud eval`, `hud deploy`, and task sync.
@@ -62,18 +59,17 @@ Pure logic modules are still the easiest wins, but the current grader can also c
 
 ### 1. Generate the task bundle
 
-From the repo root:
+From this directory:
 
 ```bash
 source .env
 
 uv run ast-pilot run path/to/your_module.py \
     --tests path/to/test_your_module.py \
-    --name your-task-slug \
-    --output output/your-task-slug
+    --name your-task-slug
 ```
 
-If you omit `--output`, the tool defaults to `output/<name>/`.
+When you run this from this directory, the task package you will actually work with ends up in `tasks/your_task_slug/`.
 
 For real tasks, use the normal LLM-backed flow. It scans the source, renders `start.md`, validates the prompt against the extracted evidence, auto-fixes prompt mistakes when possible, and then packages the task bundle.
 
@@ -86,28 +82,25 @@ In practice, this gets you most of the way there. You usually get:
 - hidden tests and golden validation files
 - hidden support modules and hidden dependency manifests when they are needed
 
-You should still review the output before shipping, especially for task difficulty, prompt clarity, and odd dependency edges.
+You should still review the generated task package before shipping, especially for task difficulty, prompt clarity, and odd dependency edges.
 
-### 2. Promote the generated task into `01-coding-template`
+If hidden tests depend on repo-internal modules that the generator cannot safely carry forward, generation now fails by default instead of silently inserting `skip` or `xfail` markers. If you intentionally want that downgraded behavior, set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`.
 
-The generated task bundle lives under `output/<slug>/tasks/<slug>/`. The template repo uses an importable package directory name, so in practice you usually copy the slugged task folder into an underscored package directory.
+### 2. Review the generated task in `tasks/`
 
-Example:
+The HUD task ID is still slug-shaped, for example `anthropic-adapter`, but the package directory under `tasks/` must be importable Python, so the on-disk folder uses underscores instead:
 
-```bash
-rm -rf 01-coding-template/tasks/your_task_slug
-cp -r output/your-task-slug/tasks/your-task-slug \
-    01-coding-template/tasks/your_task_slug
+```text
+tasks/anthropic_adapter/
 ```
 
-For example, `anthropic-adapter` becomes `01-coding-template/tasks/anthropic_adapter`.
+That task package is the thing you build, validate, deploy, and sync.
 
 ### 3. Build and validate before doing anything else
 
-Validation happens from inside `01-coding-template/`:
+Validation happens from this same directory:
 
 ```bash
-cd 01-coding-template
 hud build .
 hud eval . integration_test --task-ids your-task-slug -y
 ```
@@ -135,16 +128,16 @@ This is a separate question from `integration_test`. A task can be perfectly val
 After the task validates cleanly:
 
 ```bash
-hud deploy
-hud sync tasks
+hud deploy .
+uv run sync-tasks --taskset <taskset-name> --env <env-name>
 ```
 
 What each command does:
 
-- `hud deploy` creates or updates the HUD environment image
-- `hud sync tasks` uploads the local task definitions to the HUD taskset
+- `hud deploy .` creates or updates the HUD environment image
+- `uv run sync-tasks ...` uploads the local task definitions to the HUD taskset
 
-Important: `hud sync tasks` is not a universal replacement for `hud deploy`.
+Important: task sync is not a universal replacement for `hud deploy .`.
 
 You still need to redeploy when you change anything that affects the environment image, including:
 
@@ -162,27 +155,21 @@ For larger-scale usage patterns, see the HUD docs:
 
 ## What Gets Generated
 
-`ast-pilot run` produces a scratch output directory like this:
+`ast-pilot run` creates a task package like this under `tasks/`:
 
 ```text
-output/your-task-slug/
-├── evidence.json
-├── start.md
-└── tasks/
-    └── your-task-slug/
-        ├── __init__.py
-        ├── prompt.md
-        ├── task.py
-        ├── tests/
-        ├── golden/
-        ├── support/
-        └── requirements.hidden.txt
+tasks/your_task_slug/
+├── __init__.py
+├── prompt.md
+├── task.py
+├── tests/
+├── golden/
+├── support/
+└── requirements.hidden.txt
 ```
 
 Here is what each piece is for:
 
-- `evidence.json` is the raw AST extraction. It is useful for debugging, but it is not shipped to the agent.
-- `start.md` is the generated task spec before it gets copied into the task package.
 - `prompt.md` is the agent-facing version of that spec.
 - `task.py` wires the task into the HUD environment, injects the hidden tests, and defines the golden validation steps.
 - `tests/` contains the hidden pytest files used for grading.
@@ -208,10 +195,11 @@ If this step fails, the task setup is broken. Fix the harness first. Do not diag
 The generator is in good shape, but it is not magic. The current boundaries are:
 
 - repo-internal dependency resolution works in many cases, but deep or unusual import graphs can still need manual cleanup
+- common `src/` layouts are handled more reliably now, but unusual packaging setups can still need manual cleanup
 - pure Python modules are the safest path today
 - modules that depend on native extensions, live services, databases, or app runtime state are not good task candidates
 - `integration_test` proves the harness is sound, but it does not prove the task will be easy for a model
-- `hud sync tasks` is not always enough after the first deploy; if hidden support, hidden dependencies, or shared environment files changed, you must run `hud deploy` again so the image actually contains those changes
+- syncing tasks is not always enough after the first deploy; if hidden support, hidden dependencies, or shared environment files changed, you must run `hud deploy .` again so the image actually contains those changes
 
 If you want the highest reliability, prefer focused, self-contained modules with strong test coverage and minimal runtime coupling.
 
@@ -227,8 +215,7 @@ Dry-run example:
 uv run ast-pilot run path/to/source.py \
     --tests path/to/tests.py \
     --name my-task \
-    --no-llm \
-    --output output/my-task
+    --no-llm
 ```
 
 ## Troubleshooting
@@ -243,6 +230,16 @@ The usual causes are:
 
 Check the failing import first. That will usually tell you whether the problem is hidden support, a missing dependency, or a bad test rewrite.
 
+### Generation fails because hidden tests reference unsupported internal modules
+
+The generator now fails by default when hidden tests depend on repo-internal modules that it cannot safely bundle for grading. That is intentional: silently downgrading those tests with `skip` or `xfail` makes the task look sounder than it really is.
+
+Your options are:
+
+- pick a simpler source module with fewer hidden test dependencies
+- manually reduce the hidden test surface so the unsupported imports go away
+- only if you intentionally accept downgraded coverage, rerun with `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`
+
 ### `Reward: 0.000` in `integration_test`
 
 Treat this as a broken task harness, not a model failure.
@@ -251,7 +248,7 @@ Common causes:
 
 - the golden source cannot import one of its hidden dependencies
 - the hidden tests still refer to the original package path instead of the workspace module
-- the task package was copied into the wrong directory name under `01-coding-template/tasks/`
+- the task package was copied into the wrong directory name under `tasks/`
 
 ### `integration_test` passes but agent pass rate is poor
 
@@ -301,6 +298,7 @@ The validator checks prose against exact extracted facts. When it flags somethin
 | `ANTHROPIC_API_KEY` | required for LLM mode | Used for prompt generation and fixer calls |
 | `HUD_API_KEY` | required for HUD commands | Used by `hud eval`, `hud deploy`, and sync |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
+| `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation. |
 | `HUD_ENV_NAME` | `mario-claire` | Original local placeholder environment name. It is hardcoded into the template and task wiring and MUST be changed for your own deployment. |
 | `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
@@ -309,7 +307,7 @@ The validator checks prose against exact extracted facts. When it flags somethin
 If you only remember one path, remember this:
 
 1. Generate with `uv run ast-pilot run ...`
-2. Copy the task into `01-coding-template/tasks/...`
+2. Copy the task into `tasks/...`
 3. Run `hud build .`
 4. Run `hud eval . integration_test --task-ids <slug> -y`
 5. Only then run model evals or deploy
