@@ -6,11 +6,13 @@ types, invented symbols, wrong constant values, wrong dict key names.
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .evidence import Evidence
+from .scanner import _annotation_str, _format_signature_params
 
 
 @dataclass
@@ -50,6 +52,15 @@ class ValidationResult:
             loc = f" (line {issue.line})" if issue.line else ""
             lines.append(f"  [{prefix}] {issue.section}{loc}: {issue.message}")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class DocumentedSignature:
+    line: int
+    owner: str
+    name: str
+    params: str
+    return_annotation: str
 
 
 def validate(ev: Evidence, md_path: str | Path) -> ValidationResult:
@@ -99,22 +110,32 @@ def _check_symbols_exist(ev: Evidence, md: str, md_lines: list[str], result: Val
 
 
 def _check_param_names(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
-    """Check that parameter names used in the LLM prose match the evidence."""
+    """Check that documented function signatures match the evidence exactly."""
 
+    sig_map: dict[tuple[str, str], str] = {}
     for mod in ev.source_files:
-        all_fns = list(mod.functions)
+        for fn in mod.functions:
+            sig_map[("", fn.name)] = fn.signature_params or _fallback_signature_params(fn)
         for cls in mod.classes:
-            all_fns.extend(cls.methods)
+            for method in cls.methods:
+                sig_map[(cls.name, method.name)] = method.signature_params or _fallback_signature_params(method)
 
-        for fn in all_fns:
-            if fn.name.startswith("_") and not fn.name.startswith("__"):
-                continue
-            for i, line in enumerate(md_lines):
-                if fn.name not in line:
-                    continue
-                for param in fn.params:
-                    if param.name in ("self", "cls"):
-                        continue
+    for sig in _iter_documented_signatures(md_lines):
+        ev_params = sig_map.get((sig.owner, sig.name))
+        if ev_params is None and sig.owner:
+            ev_params = sig_map.get(("", sig.name))
+        if ev_params is None:
+            continue
+        if _normalize_signature(sig.params) != _normalize_signature(ev_params):
+            symbol = _display_symbol(sig.owner, sig.name)
+            result.issues.append(
+                ValidationIssue(
+                    "error",
+                    "parameters",
+                    f"'{symbol}' parameters: md says '{sig.params}', evidence says '{ev_params}'",
+                    line=sig.line,
+                )
+            )
 
 
 def _check_return_types(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
@@ -129,43 +150,27 @@ def _check_return_types(ev: Evidence, md: str, md_lines: list[str], result: Vali
     sig_map: dict[tuple[str, str], str] = {}
     for mod in ev.source_files:
         for fn in mod.functions:
-            if fn.return_annotation and not fn.name.startswith("_"):
-                sig_map[("", fn.name)] = fn.return_annotation
+            sig_map[("", fn.name)] = fn.return_annotation
         for cls in mod.classes:
             for method in cls.methods:
-                if method.return_annotation and not method.name.startswith("_"):
-                    sig_map[(cls.name, method.name)] = method.return_annotation
+                sig_map[(cls.name, method.name)] = method.return_annotation
 
-    current_class = ""
-    for i, line in enumerate(md_lines):
-        cls_match = re.search(r"`(\w+)`\s+[Cc]lass", line)
-        if cls_match:
-            current_class = cls_match.group(1)
-            continue
-
-        stripped = line.strip()
-        if not stripped.startswith(("def ", "async def")):
-            continue
-
-        match = re.search(r"def\s+(\w+)\(.*?\)\s*->\s*(.+?):", stripped)
-        if not match:
-            continue
-
-        fn_name = match.group(1)
-        md_ret = match.group(2).strip().rstrip("`").rstrip("*")
-
-        ev_ret = sig_map.get((current_class, fn_name)) or sig_map.get(("", fn_name))
-        if not ev_ret:
+    for sig in _iter_documented_signatures(md_lines):
+        ev_ret = sig_map.get((sig.owner, sig.name))
+        if ev_ret is None and sig.owner:
+            ev_ret = sig_map.get(("", sig.name))
+        if ev_ret is None:
             continue
 
         ev_ret = ev_ret.strip().strip('"').strip("'")
-        if md_ret and ev_ret and not _types_equivalent(md_ret, ev_ret):
+        if not _types_equivalent(sig.return_annotation, ev_ret):
+            symbol = _display_symbol(sig.owner, sig.name)
             result.issues.append(
                 ValidationIssue(
                     "error",
                     "return_type",
-                    f"'{current_class}.{fn_name}' return type: md says '{md_ret}', evidence says '{ev_ret}'",
-                    line=i + 1,
+                    f"'{symbol}' return type: md says '{sig.return_annotation}', evidence says '{ev_ret}'",
+                    line=sig.line,
                 )
             )
 
@@ -332,6 +337,80 @@ def _types_equivalent(a: str, b: str) -> bool:
     a = a.strip().replace(" ", "").replace('"', "").replace("'", "").rstrip(")").rstrip("`").rstrip("*")
     b = b.strip().replace(" ", "").replace('"', "").replace("'", "").rstrip(")").rstrip("`").rstrip("*")
     return a == b
+
+
+def _iter_documented_signatures(md_lines: list[str]) -> list[DocumentedSignature]:
+    signatures: list[DocumentedSignature] = []
+    current_class = ""
+
+    for i, line in enumerate(md_lines):
+        stripped = line.strip()
+
+        class_heading = re.match(r"^###\s+\d+\.\s+`(\w+)`\s+[Cc]lass$", stripped)
+        if class_heading:
+            current_class = class_heading.group(1)
+            continue
+
+        function_heading = re.match(r"^###\s+\d+\.\s+`(\w+)`\s+[Ff]unction$", stripped)
+        if function_heading:
+            current_class = ""
+            continue
+
+        parsed = _parse_signature_line(stripped)
+        if parsed is None:
+            continue
+
+        fn_name, params, ret = parsed
+        signatures.append(
+            DocumentedSignature(
+                line=i + 1,
+                owner=current_class,
+                name=fn_name,
+                params=params,
+                return_annotation=ret,
+            )
+        )
+
+    return signatures
+
+
+def _parse_signature_line(line: str) -> tuple[str, str, str] | None:
+    if not line.startswith(("def ", "async def ")):
+        return None
+
+    wrapped = f"{line}\n    pass\n"
+    try:
+        tree = ast.parse(wrapped)
+    except SyntaxError:
+        return None
+
+    node = tree.body[0] if tree.body else None
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+
+    params = _format_signature_params(node.args, wrapped)
+    return_annotation = _annotation_str(node.returns, wrapped).strip().strip('"').strip("'")
+    return node.name, params, return_annotation
+
+
+def _fallback_signature_params(fn) -> str:
+    parts: list[str] = []
+    for param in fn.params:
+        piece = param.name
+        if param.annotation:
+            piece += f": {param.annotation}"
+        if param.default:
+            piece += f" = {param.default}"
+        parts.append(piece)
+    return ", ".join(parts)
+
+
+def _normalize_signature(value: str) -> str:
+    return value.strip().replace(" ", "").replace('"', "'")
+
+
+def _display_symbol(owner: str, name: str) -> str:
+    return f"{owner}.{name}" if owner else name
 
 
 def _normalize_value(v: str) -> str:

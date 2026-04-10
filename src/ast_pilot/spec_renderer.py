@@ -547,6 +547,9 @@ def _render_function_block(fn: FunctionInfo, is_method: bool) -> list[str]:
 
 def _format_params_str(fn: FunctionInfo) -> str:
     """Format just the parameter list (no parens, no return type)."""
+    if fn.signature_params:
+        return fn.signature_params
+
     parts: list[str] = []
     for p in fn.params:
         s = p.name

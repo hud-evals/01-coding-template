@@ -138,6 +138,7 @@ def _extract_function(
         lineno=node.lineno,
         decorators=[_decorator_name(d) for d in node.decorator_list],
         params=params,
+        signature_params=_format_signature_params(node.args, source),
         return_annotation=_annotation_str(node.returns, source),
         docstring=ast.get_docstring(node) or "",
         is_async=isinstance(node, ast.AsyncFunctionDef),
@@ -182,7 +183,7 @@ def _extract_params(args: ast.arguments, source: str) -> list[Parameter]:
 
     params: list[Parameter] = []
 
-    all_args = args.args + args.posonlyargs
+    all_args = args.posonlyargs + args.args
     defaults_offset = len(all_args) - len(args.defaults)
 
     for i, arg in enumerate(all_args):
@@ -227,6 +228,57 @@ def _extract_params(args: ast.arguments, source: str) -> list[Parameter]:
         )
 
     return params
+
+
+def _format_signature_params(args: ast.arguments, source: str) -> str:
+    """Render an exact Python parameter list, preserving `/` and bare `*`."""
+
+    parts: list[str] = []
+    positional = list(args.posonlyargs) + list(args.args)
+    defaults_offset = len(positional) - len(args.defaults)
+
+    for i, arg in enumerate(args.posonlyargs):
+        default = _positional_default(i, defaults_offset, args.defaults, source)
+        parts.append(_format_arg(arg, source, default=default))
+    if args.posonlyargs:
+        parts.append("/")
+
+    for i, arg in enumerate(args.args, start=len(args.posonlyargs)):
+        default = _positional_default(i, defaults_offset, args.defaults, source)
+        parts.append(_format_arg(arg, source, default=default))
+
+    if args.vararg:
+        parts.append(_format_arg(args.vararg, source, prefix="*"))
+    elif args.kwonlyargs:
+        parts.append("*")
+
+    for i, arg in enumerate(args.kwonlyargs):
+        default = ""
+        if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
+            default = _annotation_str(args.kw_defaults[i], source)
+        parts.append(_format_arg(arg, source, default=default))
+
+    if args.kwarg:
+        parts.append(_format_arg(args.kwarg, source, prefix="**"))
+
+    return ", ".join(parts)
+
+
+def _positional_default(index: int, defaults_offset: int, defaults: list[ast.expr], source: str) -> str:
+    default_idx = index - defaults_offset
+    if 0 <= default_idx < len(defaults):
+        return _annotation_str(defaults[default_idx], source)
+    return ""
+
+
+def _format_arg(arg: ast.arg, source: str, default: str = "", prefix: str = "") -> str:
+    rendered = f"{prefix}{arg.arg}"
+    annotation = _annotation_str(arg.annotation, source)
+    if annotation:
+        rendered += f": {annotation}"
+    if default:
+        rendered += f" = {default}"
+    return rendered
 
 
 def _extract_string_literals(tree: ast.AST) -> list[str]:

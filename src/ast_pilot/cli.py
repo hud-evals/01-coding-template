@@ -104,12 +104,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     max_fix_rounds = 3
     dismissed_keys: set[str] = set()
     for fix_round in range(1, max_fix_rounds + 1):
-        real_errors = [
-            issue
-            for issue in vr.issues
-            if issue.severity == "error"
-            and f"{issue.line}:{issue.message[:60]}" not in dismissed_keys
-        ]
+        real_errors = _undismissed_errors(vr, dismissed_keys)
         if not real_errors or not use_llm:
             break
 
@@ -134,18 +129,21 @@ def cmd_run(args: argparse.Namespace) -> None:
 
         print(f"\n=== Re-validating (round {fix_round}) ===")
         vr = validate(ev, out_dir / "start.md")
-        remaining = [
-            i
-            for i in vr.issues
-            if i.severity == "error"
-            and f"{i.line}:{i.message[:60]}" not in dismissed_keys
-        ]
+        remaining = _undismissed_errors(vr, dismissed_keys)
         if remaining:
             print(f"  {len(remaining)} errors remaining")
             for i in remaining:
                 print(f"    [ERROR] {i.message}")
         else:
             print(f"  PASSED (0 errors, {len(dismissed_keys)} dismissed)")
+
+    remaining_errors = _undismissed_errors(vr, dismissed_keys)
+    if remaining_errors:
+        print("\nValidation failed: unresolved factual errors remain in start.md.")
+        print("Refusing to generate a task bundle until the prompt matches the extracted evidence.")
+        for issue in remaining_errors:
+            print(f"  [ERROR] {issue.message}")
+        raise SystemExit(2)
 
     print("\n=== Generating task bundle ===")
     files = generate_graders(
@@ -180,6 +178,15 @@ def _promote_generated_task(output_root: Path, project_name: str) -> Path | None
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(generated_task_dir, destination)
     return destination.resolve()
+
+
+def _undismissed_errors(vr, dismissed_keys: set[str]) -> list:
+    return [
+        issue
+        for issue in vr.issues
+        if issue.severity == "error"
+        and f"{issue.line}:{issue.message[:60]}" not in dismissed_keys
+    ]
 
 
 def _slug(name: str) -> str:
