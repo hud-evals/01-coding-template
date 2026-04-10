@@ -23,6 +23,7 @@ class FunctionInfo:
     lineno: int
     decorators: list[str] = field(default_factory=list)
     params: list[Parameter] = field(default_factory=list)
+    signature_params: str = ""
     return_annotation: str = ""
     docstring: str = ""
     is_async: bool = False
@@ -174,6 +175,7 @@ def _func_from_dict(f: dict[str, Any]) -> FunctionInfo:
         lineno=f["lineno"],
         decorators=f.get("decorators", []),
         params=params,
+        signature_params=f.get("signature_params", ""),
         return_annotation=f.get("return_annotation", ""),
         docstring=f.get("docstring", ""),
         is_async=f.get("is_async", False),

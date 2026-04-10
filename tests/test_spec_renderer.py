@@ -106,6 +106,46 @@ class SpecRendererTests(unittest.TestCase):
             self.assertIn("├── target.py", md)
             self.assertNotIn("__future__", md)
 
+    def test_exact_api_preserves_positional_only_and_keyword_only_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "target.py"
+            source_path.write_text(
+                textwrap.dedent(
+                    """
+                    def exact(value: str, /, scale: int = 1, *, mode: str = "strict") -> str:
+                        return f"{value}:{scale}:{mode}"
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_path = tests_dir / "test_target.py"
+            test_path.write_text(
+                textwrap.dedent(
+                    """
+                    from target import exact
+
+
+                    def test_exact():
+                        assert exact("hello", mode="strict") == "hello:1:strict"
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(source_paths=[source_path], test_paths=[test_path], project_name="target-task")
+            md = render_start_md(ev, use_llm=False)
+
+            self.assertIn(
+                'def exact(value: str, /, scale: int = 1, *, mode: str = "strict") -> str',
+                md,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
