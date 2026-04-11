@@ -19,7 +19,7 @@ class LlmClientTests(unittest.TestCase):
         reset_client()
 
     def test_returns_none_when_no_api_keys_set(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {}, clear=True), patch("ast_pilot.llm_client._load_dotenv"):
             result = call_text_llm("hello")
         self.assertIsNone(result)
 

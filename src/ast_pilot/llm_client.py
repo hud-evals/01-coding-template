@@ -70,6 +70,8 @@ def _get_client():
     if _client is not None:
         return _client
 
+    _load_dotenv()
+
     hud_key = os.environ.get("HUD_API_KEY", "")
     if not hud_key:
         return None
@@ -87,7 +89,42 @@ def _get_client():
         return None
 
 
+_dotenv_loaded = False
+
+
+def _load_dotenv() -> None:
+    """Load .env from the working directory or its parents if not already in env."""
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _dotenv_loaded = True
+
+    if os.environ.get("HUD_API_KEY"):
+        return
+
+    from pathlib import Path
+
+    for parent in (Path.cwd(), *Path.cwd().parents):
+        env_file = parent / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:]
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value and key not in os.environ:
+                    os.environ[key] = value
+            break
+
+
 def reset_client() -> None:
     """Reset the cached client (useful for testing)."""
-    global _client
+    global _client, _dotenv_loaded
     _client = None
+    _dotenv_loaded = False

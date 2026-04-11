@@ -81,6 +81,8 @@ class AlignmentIssue:
 @dataclass
 class AlignmentReview:
     issues: list[AlignmentIssue] = field(default_factory=list)
+    confidence: str = ""
+    verdict: str = ""
 
     @property
     def blocking_issues(self) -> list[AlignmentIssue]:
@@ -133,14 +135,19 @@ def review_task_alignment(
         raw_issues.extend(per_file)
 
     if not raw_issues:
-        return AlignmentReview()
+        verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
+        return AlignmentReview(**verdict)
 
     confirmed = _confirmation_pass(
         prompt_md, raw_issues, test_files,
         max_tokens=max_confirm_tokens,
     )
 
-    return _parse_issues(confirmed)
+    review = _parse_issues(confirmed)
+    verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=confirmed)
+    review.confidence = verdict.get("confidence", "")
+    review.verdict = verdict.get("verdict", "")
+    return review
 
 
 def _load_prompt(task_dir: Path) -> str:
@@ -228,6 +235,48 @@ Output strict JSON matching this schema:
         return []
 
     return _parse_raw_issues_json(response)
+
+
+def _get_confidence_verdict(
+    prompt_md: str,
+    test_files: list[tuple[str, str]],
+    gap_context: str,
+    *,
+    issues: list[dict],
+) -> dict:
+    test_names = ", ".join(name for name, _ in test_files)
+    issue_summary = f"{len(issues)} issues found" if issues else "no issues found"
+
+    user_prompt = f"""You just reviewed a coding task for prompt-grader alignment.
+
+Task has {len(test_files)} test file(s): {test_names}
+Review result: {issue_summary}
+
+{gap_context}
+
+Prompt length: {len(prompt_md)} chars
+
+Rate your confidence that an agent following only the prompt would pass \
+the hidden tests. Be honest and brief.
+
+Output strict JSON:
+{{
+  "confidence": "high" | "medium" | "low",
+  "verdict": "1-2 sentence summary of alignment quality and any residual risk"
+}}"""
+
+    response = call_text_llm(user_prompt, max_tokens=256, expect_json=True)
+    if response is None:
+        return {"confidence": "", "verdict": ""}
+
+    try:
+        data = json.loads(response)
+        return {
+            "confidence": str(data.get("confidence", "")),
+            "verdict": str(data.get("verdict", "")),
+        }
+    except (json.JSONDecodeError, TypeError):
+        return {"confidence": "", "verdict": ""}
 
 
 def _confirmation_pass(

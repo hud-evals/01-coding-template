@@ -85,11 +85,13 @@ def cmd_bundle(args: argparse.Namespace) -> None:
                 print("\nAlignment check failed: unresolved prompt-grader contradictions.")
                 for issue in alignment.blocking_issues:
                     print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
+                _print_alignment_verdict(alignment)
                 raise SystemExit(2)
             elif alignment.is_clean:
                 print("  Alignment: PASSED (no issues)")
             else:
                 print(f"  Alignment: OK ({len(alignment.issues)} remaining non-blocking issues)")
+            _print_alignment_verdict(alignment)
 
         promoted_to = _promote_generated_task(out_dir, ev.project_name)
         if promoted_to is not None:
@@ -208,11 +210,13 @@ def cmd_run(args: argparse.Namespace) -> None:
                 print("\nAlignment check failed: unresolved prompt-grader contradictions.")
                 for issue in alignment.blocking_issues:
                     print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
+                _print_alignment_verdict(alignment)
                 raise SystemExit(2)
             elif alignment.is_clean:
                 print("  Alignment: PASSED (no issues)")
             else:
                 print(f"  Alignment: OK ({len(alignment.issues)} remaining non-blocking issues)")
+            _print_alignment_verdict(alignment)
         elif not use_llm:
             print("\n  (Alignment review skipped — LLM mode disabled)")
 
@@ -224,6 +228,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     finally:
         if cleanup_after_success and promoted_to is not None:
             shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _print_alignment_verdict(alignment) -> None:
+    if alignment.confidence:
+        print(f"  Confidence: {alignment.confidence}")
+    if alignment.verdict:
+        print(f"  Verdict: {alignment.verdict}")
 
 
 def _run_alignment_loop(task_dir: Path, ev, *, max_rounds: int = 2, use_llm: bool = True):
