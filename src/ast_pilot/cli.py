@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
@@ -58,6 +58,10 @@ def cmd_bundle(args: argparse.Namespace) -> None:
     source_paths = [mod.path for mod in ev.source_files]
     test_paths = sorted({test.test_file for test in ev.tests})
 
+    no_alignment = getattr(args, "no_alignment_autofix", False)
+    alignment_max = getattr(args, "alignment_max_rounds", 2)
+    use_llm = not getattr(args, "no_llm", False)
+
     promoted_to: Path | None = None
     try:
         files = generate_graders(
@@ -70,6 +74,22 @@ def cmd_bundle(args: argparse.Namespace) -> None:
         print(f"Generated {len(files)} files in {out_dir}/:")
         for path in sorted(files):
             print(f"  {path}")
+
+        generated_task_dir = out_dir / "tasks" / _slug(ev.project_name)
+        if use_llm and not no_alignment and generated_task_dir.is_dir():
+            print("\n=== Running prompt-grader alignment review ===")
+            alignment = _run_alignment_loop(
+                generated_task_dir, ev, max_rounds=alignment_max, use_llm=use_llm,
+            )
+            if alignment.has_blocking:
+                print("\nAlignment check failed: unresolved prompt-grader contradictions.")
+                for issue in alignment.blocking_issues:
+                    print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
+                raise SystemExit(2)
+            elif alignment.is_clean:
+                print("  Alignment: PASSED (no issues)")
+            else:
+                print(f"  Alignment: OK ({len(alignment.issues)} remaining non-blocking issues)")
 
         promoted_to = _promote_generated_task(out_dir, ev.project_name)
         if promoted_to is not None:
@@ -175,6 +195,27 @@ def cmd_run(args: argparse.Namespace) -> None:
         for path in sorted(files):
             print(f"  {path}")
 
+        no_alignment = getattr(args, "no_alignment_autofix", False)
+        alignment_max = getattr(args, "alignment_max_rounds", 2)
+        generated_task_dir = out_dir / "tasks" / _slug(ev.project_name)
+
+        if use_llm and not no_alignment and generated_task_dir.is_dir():
+            print("\n=== Running prompt-grader alignment review ===")
+            alignment = _run_alignment_loop(
+                generated_task_dir, ev, max_rounds=alignment_max, use_llm=use_llm,
+            )
+            if alignment.has_blocking:
+                print("\nAlignment check failed: unresolved prompt-grader contradictions.")
+                for issue in alignment.blocking_issues:
+                    print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
+                raise SystemExit(2)
+            elif alignment.is_clean:
+                print("  Alignment: PASSED (no issues)")
+            else:
+                print(f"  Alignment: OK ({len(alignment.issues)} remaining non-blocking issues)")
+        elif not use_llm:
+            print("\n  (Alignment review skipped — LLM mode disabled)")
+
         promoted_to = _promote_generated_task(out_dir, ev.project_name)
         if promoted_to is not None:
             print(f"\nPromoted task package -> {promoted_to}")
@@ -183,6 +224,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     finally:
         if cleanup_after_success and promoted_to is not None:
             shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _run_alignment_loop(task_dir: Path, ev, *, max_rounds: int = 2, use_llm: bool = True):
+    from .alignment_fixer import run_alignment_loop
+    return run_alignment_loop(task_dir, ev, max_rounds=max_rounds, use_llm=use_llm)
 
 
 def _promote_generated_task(output_root: Path, project_name: str) -> Path | None:
@@ -212,7 +258,7 @@ def _undismissed_errors(vr, dismissed_keys: set[str]) -> list:
     ]
 
 
-def _load_validated_prompt(ev: Evidence, prompt_path: Path) -> str:
+def _load_validated_prompt(ev, prompt_path: Path) -> str:
     from .validator import validate
 
     if not prompt_path.is_file():
@@ -280,6 +326,9 @@ def main() -> None:
     p_bundle.add_argument("evidence", help="Path to evidence.json")
     p_bundle.add_argument("--prompt", help="Path to validated prompt markdown (default: sibling start.md)")
     p_bundle.add_argument("--output", "-o", help="Optional bundle root to keep generated artifacts")
+    p_bundle.add_argument("--no-llm", action="store_true", help="Skip LLM calls")
+    p_bundle.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
+    p_bundle.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_run = sub.add_parser("run", help="Full pipeline: scan -> spec -> bundle")
@@ -289,6 +338,8 @@ def main() -> None:
     p_run.add_argument("--readme", help="Path to README.md")
     p_run.add_argument("--output", "-o", help="Optional bundle root to keep generated artifacts")
     p_run.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
+    p_run.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
+    p_run.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()

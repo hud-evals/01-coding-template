@@ -6,7 +6,6 @@ import ast
 import re
 import sys
 from pathlib import Path
-from typing import Optional
 
 from .evidence import (
     ClassInfo,
@@ -66,7 +65,7 @@ def _detect_python_version(source_paths: list[str | Path]) -> str:
     return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
-def _scan_module(path: Path) -> Optional[ModuleInfo]:
+def _scan_module(path: Path) -> ModuleInfo | None:
     """Parse a single .py file and extract its structure."""
 
     if not path.exists() or path.suffix != ".py":
@@ -102,7 +101,7 @@ def _scan_module(path: Path) -> Optional[ModuleInfo]:
         elif isinstance(node, ast.AnnAssign):
             _extract_annotated_constant(node, lines, mod)
 
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             mod.functions.append(_extract_function(node, mod.module_name, source))
 
         elif isinstance(node, ast.ClassDef):
@@ -112,7 +111,7 @@ def _scan_module(path: Path) -> Optional[ModuleInfo]:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "__all__":
-                    if isinstance(node.value, (ast.List, ast.Tuple)):
+                    if isinstance(node.value, ast.List | ast.Tuple):
                         for elt in node.value.elts:
                             if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
                                 mod.all_exports.append(elt.value)
@@ -177,7 +176,7 @@ def _extract_class(node: ast.ClassDef, module_name: str, source: str) -> ClassIn
     )
 
     for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
             fi = _extract_function(child, module_name, source)
             fi.qualname = f"{module_name}.{node.name}.{child.name}"
             fi.is_method = True
@@ -324,7 +323,7 @@ def _extract_string_literals(tree: ast.AST) -> list[str]:
 
         if isinstance(node, ast.Compare):
             for comparator_op in node.ops:
-                if isinstance(comparator_op, (ast.In, ast.NotIn)):
+                if isinstance(comparator_op, ast.In | ast.NotIn):
                     if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
                         if 2 <= len(node.left.value) <= 60:
                             seen.add(node.left.value)
@@ -332,7 +331,7 @@ def _extract_string_literals(tree: ast.AST) -> list[str]:
     return sorted(seen)
 
 
-def _annotation_str(node: Optional[ast.AST], source: str) -> str:
+def _annotation_str(node: ast.AST | None, source: str) -> str:
     """Convert an annotation AST node to source text."""
 
     if node is None:
@@ -386,7 +385,7 @@ def _scan_tests(path: Path, known_symbols: set[str]) -> list[TestEvidence]:
     results: list[TestEvidence] = []
 
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         if not node.name.startswith("test"):
             continue

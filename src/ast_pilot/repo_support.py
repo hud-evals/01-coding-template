@@ -5,10 +5,10 @@ from __future__ import annotations
 import ast
 import re
 import sys
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
 
 try:
     import tomllib
@@ -146,7 +146,7 @@ def discover_import_roots(root: Path) -> tuple[Path, ...]:
     return _discover_import_roots_cached(str(root.resolve()))
 
 
-@lru_cache(maxsize=None)
+@cache
 def _discover_import_roots_cached(root_str: str) -> tuple[Path, ...]:
     root = Path(root_str)
     roots: list[Path] = []

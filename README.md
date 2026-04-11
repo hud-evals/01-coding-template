@@ -10,7 +10,7 @@ For the end-to-end vendor workflow, task generation process, validation rules, d
 
 ```bash
 uv sync
-cp .env.example .env  # add your API keys and HUD_ENV_NAME
+cp .env.example .env  # add your HUD_API_KEY and HUD_ENV_NAME
 source .env
 
 hud build .
