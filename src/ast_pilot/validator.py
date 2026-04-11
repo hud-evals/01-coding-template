@@ -386,7 +386,7 @@ def _parse_signature_line(line: str) -> tuple[str, str, str] | None:
         return None
 
     node = tree.body[0] if tree.body else None
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
         return None
 
     params = _format_signature_params(node.args, wrapped)

@@ -22,7 +22,6 @@ from .repo_support import (
     resolve_module_candidates,
 )
 
-
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 SUPPORT_ROOT = "/opt/ast_pilot_support"
 SMALL_TEST_SUPPORT_MAX_LINES = 400
@@ -577,7 +576,7 @@ def _guard_unsupported_test_refs(
 
     module_level_refs: set[str] = set()
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
         module_level_refs.update(_collect_internal_refs_from_node(node, current_module, repo))
 
@@ -599,7 +598,7 @@ def _guard_unsupported_test_refs(
         helper_refs: set[str] = set()
         test_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         for child in node.body:
-            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             if child.name.startswith("test"):
                 test_methods.append(child)
@@ -619,7 +618,7 @@ def _guard_unsupported_test_refs(
                 handled_test_lines.add(test_method.lineno)
 
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not node.name.startswith("test"):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or not node.name.startswith("test"):
             continue
         if node.lineno in handled_test_lines:
             continue

@@ -115,7 +115,7 @@ class Evidence:
         p.write_text(self.to_json(), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: str | Path) -> "Evidence":
+    def load(cls, path: str | Path) -> Evidence:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         return _evidence_from_dict(raw)
 

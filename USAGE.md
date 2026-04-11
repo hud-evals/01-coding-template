@@ -23,7 +23,7 @@ This directory contains both:
 
 ```text
 .
-├── src/ast_pilot/      # scanner, renderer, validator, fixer, and task generator
+├── src/ast_pilot/      # scanner, renderer, validator, fixer, alignment checker, and task generator
 ├── tasks/              # generated HUD task packages (`tasks/<pkg>/task.py`)
 ├── env.py              # HUD environment and shared coding scenario
 ├── task_bootstrap.py   # local .env loading for generated tasks
@@ -48,14 +48,13 @@ Run everything below from this directory:
 ```bash
 uv sync
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY, HUD_API_KEY, and HUD_ENV_NAME
+# Fill in HUD_API_KEY and HUD_ENV_NAME
 source .env
 ```
 
 What the important variables do:
 
-- `ANTHROPIC_API_KEY`: used for LLM prompt generation and fixer passes
-- `HUD_API_KEY`: used for HUD commands such as `hud build`, `hud deploy`, and `hud eval`
+- `HUD_API_KEY`: auth for LLM calls (via HUD inference gateway) and HUD commands (`hud build`, `hud deploy`, `hud eval`)
 - `HUD_ENV_NAME`: the deployed HUD environment name your generated tasks connect to
 
 Important: `.env` is intentionally excluded from the Docker image. Local task import and sync can read `HUD_ENV_NAME` from `.env`, but the deployed environment itself must not depend on `.env` being present inside the image.
@@ -90,7 +89,9 @@ This command does the whole authoring pipeline:
 3. validates the prose against exact extracted evidence
 4. runs up to three fixer rounds when LLM mode is enabled
 5. generates the HUD task package
-6. promotes the generated task directly into `tasks/your_task_slug/`
+6. runs a prompt-grader alignment pass (deterministic gap analysis + LLM review)
+7. auto-fixes safe prompt mismatches, hard-stops on contradictions
+8. promotes the generated task directly into `tasks/your_task_slug/`
 
 If unresolved factual validation errors remain, generation stops before bundling. That is intentional: the tool now refuses to ship a prompt that drifted away from the code.
 
@@ -338,14 +339,35 @@ If you are calibrating difficulty more seriously, run multiple attempts and insp
 
 The validator checks prose against exact extracted facts. When it flags something suspicious, inspect the specific line and compare it with the extracted evidence. Some false positives do happen, but most real failures come from signatures, constants, or field names drifting in prose.
 
+## Prompt-Grader Alignment
+
+After generating the task bundle, `ast-pilot` runs an automatic LLM-only alignment pass that compares the final `prompt.md` against the final hidden test files.
+
+Safe mismatches (e.g. prompt underspecifies an output format that the grader requires) are automatically corrected in the prompt. Fundamentally inconsistent tasks (e.g. prompt says raise an exception but grader expects a return value) cause the CLI to exit non-zero before promotion.
+
+After every auto-fix the prompt is re-validated against the original source evidence to prevent the LLM from "fixing" the prompt into something factually wrong.
+
+This pass is enabled by default when LLM mode is active. To disable it:
+
+```bash
+uv run ast-pilot run ... --no-alignment-autofix
+```
+
+To control the maximum number of alignment fix rounds (default 2):
+
+```bash
+uv run ast-pilot run ... --alignment-max-rounds 3
+```
+
+When `--no-llm` is passed, the alignment pass is skipped automatically.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | required for LLM mode | Used for prompt generation and fixer calls |
-| `HUD_API_KEY` | required for HUD commands | Used by `hud build`, `hud deploy`, `hud eval`, and sync |
+| `HUD_API_KEY` | required for LLM mode | Used for LLM calls via the HUD inference gateway and for HUD commands |
 | `HUD_ENV_NAME` | required | Deployed HUD environment name used by local task import, generated tasks, and sync |
-| `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation and fixer calls |
+| `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model used for prose generation, fixer calls, and alignment review |
 | `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation |
 | `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 

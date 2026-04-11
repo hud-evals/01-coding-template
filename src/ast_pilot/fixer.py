@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from .evidence import Evidence
+from .llm_client import call_text_llm
 from .validator import ValidationIssue, ValidationResult
 
 
@@ -188,18 +187,6 @@ def _get_relevant_evidence(ev: Evidence, issue: ValidationIssue) -> str:
     return "\n".join(lines)
 
 
-def _get_llm_client():
-    try:
-        import anthropic
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return None
-        return anthropic.Anthropic(api_key=api_key)
-    except ImportError:
-        return None
-
-
 def _issue_symbol(message: str) -> tuple[str, str]:
     match = re.match(r"'([\w\.]+)'", message)
     if not match:
@@ -209,19 +196,5 @@ def _issue_symbol(message: str) -> tuple[str, str]:
     return owner_name, symbol_name or symbol
 
 
-def _call_llm(prompt: str, max_tokens: int = 512) -> Optional[str]:
-    client = _get_llm_client()
-    if client is None:
-        return None
-    try:
-        model = os.environ.get("AST_PILOT_MODEL", "claude-haiku-4-5")
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        return response.content[0].text
-    except Exception as e:
-        print(f"[warn] Fixer LLM call failed: {e}")
-        return None
+def _call_llm(prompt: str, max_tokens: int = 512) -> str | None:
+    return call_text_llm(prompt, max_tokens=max_tokens)

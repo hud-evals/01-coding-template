@@ -6,21 +6,19 @@ Deterministic structure + Haiku 4.5 for prose-heavy sections.
 from __future__ import annotations
 
 import ast
-import os
 import textwrap
 from pathlib import Path
-from typing import Optional
 
-from .evidence import ClassInfo, Evidence, FunctionInfo, ModuleInfo
+from .evidence import Evidence, FunctionInfo
+from .llm_client import call_text_llm
 from .repo_support import (
-    RepoContext,
     STDLIB_MODULES,
+    RepoContext,
     find_repo_context,
     module_name_from_path,
     resolve_from_module,
     resolve_module_candidates,
 )
-
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 
@@ -699,43 +697,10 @@ def _build_test_facts(ev: Evidence) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LLM layer (Haiku 4.5)
+# LLM layer — delegates to the shared llm_client module
 # ---------------------------------------------------------------------------
 
-_llm_client = None
 
-
-def _get_llm_client():
-    global _llm_client
-    if _llm_client is not None:
-        return _llm_client
-
-    try:
-        import anthropic
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return None
-        _llm_client = anthropic.Anthropic(api_key=api_key)
-        return _llm_client
-    except ImportError:
-        return None
-
-
-def _call_llm(prompt: str, max_tokens: int = 16384) -> Optional[str]:
+def _call_llm(prompt: str, max_tokens: int = 16384) -> str | None:
     """Call the configured LLM for a single section draft."""
-    client = _get_llm_client()
-    if client is None:
-        return None
-
-    try:
-        model = os.environ.get("AST_PILOT_MODEL", "claude-haiku-4-5")
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        return response.content[0].text
-    except Exception as e:
-        print(f"[warn] LLM call failed: {e}")
-        return None
+    return call_text_llm(prompt, max_tokens=max_tokens)
