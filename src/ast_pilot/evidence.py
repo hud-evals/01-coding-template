@@ -52,6 +52,17 @@ class ClassInfo:
 
 
 @dataclass
+class InterfaceInfo:
+    """Exported TypeScript interface or type alias with its member names."""
+
+    name: str
+    module: str
+    lineno: int
+    members: list[tuple[str, str]] = field(default_factory=list)
+    is_type_alias: bool = False
+
+
+@dataclass
 class ModuleInfo:
     path: str
     module_name: str
@@ -62,6 +73,7 @@ class ModuleInfo:
     constants: list[tuple[str, str]] = field(default_factory=list)
     functions: list[FunctionInfo] = field(default_factory=list)
     classes: list[ClassInfo] = field(default_factory=list)
+    interfaces: list[InterfaceInfo] = field(default_factory=list)
     string_literals: list[str] = field(default_factory=list)
     line_count: int = 0
 
@@ -85,6 +97,14 @@ class Evidence:
     total_loc: int = 0
     python_version: str = field(default_factory=_default_python_version)
     dependencies: list[str] = field(default_factory=list)
+
+    language: str = "python"
+    runtime: str = ""
+    runtime_version: str = ""
+    package_manager: str = ""
+    test_runner: str = ""
+    module_system: str = ""
+    config_files: list[str] = field(default_factory=list)
 
     def all_public_symbols(self) -> list[str]:
         symbols: list[str] = []
@@ -129,6 +149,13 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
         python_version=d.get("python_version", _default_python_version()),
         dependencies=d.get("dependencies", []),
         readme_sections=d.get("readme_sections", {}),
+        language=d.get("language", "python"),
+        runtime=d.get("runtime", ""),
+        runtime_version=d.get("runtime_version", ""),
+        package_manager=d.get("package_manager", ""),
+        test_runner=d.get("test_runner", ""),
+        module_system=d.get("module_system", ""),
+        config_files=d.get("config_files", []),
     )
     for m in d.get("source_files", []):
         mod = ModuleInfo(
@@ -158,6 +185,14 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
             for method in c.get("methods", []):
                 ci.methods.append(_func_from_dict(method))
             mod.classes.append(ci)
+        for iface in m.get("interfaces", []):
+            mod.interfaces.append(InterfaceInfo(
+                name=iface["name"],
+                module=iface.get("module", ""),
+                lineno=iface.get("lineno", 0),
+                members=[(mb[0], mb[1]) for mb in iface.get("members", [])],
+                is_type_alias=iface.get("is_type_alias", False),
+            ))
         ev.source_files.append(mod)
     for t in d.get("tests", []):
         ev.tests.append(

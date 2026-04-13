@@ -1,4 +1,4 @@
-"""Fixer: use an LLM to fix or dismiss validator errors in a generated start.md."""
+"""Fixer: use an LLM to fix or dismiss validator errors in a generated prompt.md."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def fix_issues(
     md_path: str | Path,
     validation: ValidationResult,
 ) -> tuple[str, list[FixAction]]:
-    """Fix validator errors in a start.md using targeted LLM calls.
+    """Fix validator errors in a prompt.md using targeted LLM calls.
 
     Returns (corrected_md, list of actions taken).
     """
@@ -42,7 +42,14 @@ def fix_issues(
         context = _get_context(md_lines, issue.line, window=5)
         evidence_snippet = _get_relevant_evidence(ev, issue)
 
-        prompt = f"""You are a factual accuracy checker for a Python library specification document.
+        lang_label = "TypeScript" if getattr(ev, "language", "python") == "typescript" else "Python"
+        code_hint = (
+            'If the line is code (starts with "function ", "export ", "class ", etc.), output the corrected code line.'
+            if lang_label == "TypeScript"
+            else 'If the line is code (starts with "def "), output the corrected code line.'
+        )
+
+        prompt = f"""You are a factual accuracy checker for a {lang_label} library specification document.
 
 A validator found this issue:
   Section: {issue.section}
@@ -62,7 +69,7 @@ Your job:
 1. If this is a REAL ERROR (the md says something factually wrong vs the evidence), output EXACTLY:
    FIX: <the corrected version of ONLY the problematic line, preserving its format>
    The fix must be a single line that can directly replace the marked line (>>>).
-   If the line is code (starts with "def "), output the corrected code line.
+   {code_hint}
    If the line is prose, output the corrected prose line.
    Do NOT output explanations, only the replacement line.
 2. If this is a FALSE POSITIVE (the md is actually correct, or the validator is comparing the wrong things), output EXACTLY:

@@ -115,7 +115,7 @@ class CliTests(unittest.TestCase):
             root = Path(tmpdir)
             evidence_path = root / "evidence.json"
             evidence_path.write_text("{}", encoding="utf-8")
-            prompt_path = root / "start.md"
+            prompt_path = root / "prompt.md"
             prompt_path.write_text("# demo-task\n", encoding="utf-8")
 
             args = argparse.Namespace(
@@ -143,7 +143,7 @@ class CliTests(unittest.TestCase):
             root = Path(tmpdir)
             evidence_path = root / "evidence.json"
             evidence_path.write_text("{}", encoding="utf-8")
-            prompt_path = root / "start.md"
+            prompt_path = root / "prompt.md"
             prompt_path.write_text("# demo-task\n\nBuild it.\n", encoding="utf-8")
             source_path = root / "demo.py"
             source_path.write_text("def demo():\n    return 1\n", encoding="utf-8")

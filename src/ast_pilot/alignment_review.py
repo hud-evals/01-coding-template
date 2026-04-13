@@ -24,6 +24,11 @@ from .llm_client import call_text_llm
 MAX_REVIEW_TOKENS = 8192
 MAX_CONFIRM_TOKENS = 8192
 
+
+def _log(msg: str, *, end: str = "\n") -> None:
+    import sys
+    print(msg, end=end, flush=True)
+
 REVIEW_SYSTEM_PROMPT = """\
 You are a benchmark contract auditor.
 
@@ -104,49 +109,110 @@ class AlignmentReview:
 def review_task_alignment(
     task_dir: str | Path,
     *,
+    language: str = "",
     max_review_tokens: int = MAX_REVIEW_TOKENS,
     max_confirm_tokens: int = MAX_CONFIRM_TOKENS,
 ) -> AlignmentReview:
     """Run a two-stage LLM alignment review on a generated task directory.
 
-    *task_dir* must contain ``prompt.md`` and ``tests/*.py``.
+    *task_dir* must contain ``prompt.md`` and a ``tests/`` subtree.
     Optionally reads ``task.py`` for bash_checks context.
+
+    *language* can be ``"python"`` or ``"typescript"``.  When empty the
+    loader auto-detects based on file extensions found under ``tests/``.
     """
     task_dir = Path(task_dir)
     prompt_md = _load_prompt(task_dir)
-    test_files = _load_test_files(task_dir)
+    test_files = _load_test_files(task_dir, language=language)
     task_py_summary = _load_task_summary(task_dir)
 
     if not test_files:
         return AlignmentReview()
 
-    expectations = extract_grader_expectations(test_files)
-    surface = extract_prompt_surface(prompt_md)
-    gap_report = compute_gaps(expectations, surface)
+    import time as _time
+
+    _log(f"  Loading {len(test_files)} hidden test file(s)…")
+    expectations = extract_grader_expectations(test_files, language=language)
+    surface = extract_prompt_surface(prompt_md, language=language)
+    gap_report = compute_gaps(expectations, surface, language=language)
     gap_context = gap_report.format_for_llm()
+    if gap_report.total_gaps == 0:
+        _log("  Deterministic gap analysis: clean (0 gaps)")
+    else:
+        parts = []
+        if gap_report.imports_not_in_prompt:
+            parts.append(f"{len(gap_report.imports_not_in_prompt)} imports")
+        if gap_report.methods_not_in_prompt:
+            parts.append(f"{len(gap_report.methods_not_in_prompt)} methods")
+        if gap_report.attributes_not_in_prompt:
+            parts.append(f"{len(gap_report.attributes_not_in_prompt)} attrs")
+        if gap_report.classes_not_in_prompt:
+            parts.append(f"{len(gap_report.classes_not_in_prompt)} classes")
+        if gap_report.module_mismatches:
+            parts.append(f"{len(gap_report.module_mismatches)} modules")
+        _log(f"  Deterministic gap analysis: {gap_report.total_gaps} candidates ({', '.join(parts)})")
+        _log("    Most are test-internal (mock vars, test data, JS builtins) — LLM review filters real issues")
 
     raw_issues: list[dict] = []
-    for test_name, test_content in test_files:
+    t0 = _time.monotonic()
+    n = len(test_files)
+
+    if n == 1:
+        test_name, test_content = test_files[0]
+        _log(f"  [1/1] Reviewing {test_name}…", end="")
         per_file = _review_single_test(
             prompt_md, test_name, test_content, task_py_summary,
             max_tokens=max_review_tokens,
             gap_context=gap_context,
         )
+        issues_tag = f" ({len(per_file)} issues)" if per_file else ""
+        _log(f" done{issues_tag} [{_time.monotonic() - t0:.1f}s]")
         raw_issues.extend(per_file)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _log(f"  Reviewing {n} test files in parallel…")
+        futures = {}
+        with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
+            for test_name, test_content in test_files:
+                fut = pool.submit(
+                    _review_single_test,
+                    prompt_md, test_name, test_content, task_py_summary,
+                    max_tokens=max_review_tokens,
+                    gap_context=gap_context,
+                )
+                futures[fut] = test_name
+
+            done_count = 0
+            for fut in as_completed(futures):
+                done_count += 1
+                test_name = futures[fut]
+                per_file = fut.result()
+                issues_tag = f" ({len(per_file)} issues)" if per_file else ""
+                _log(f"    [{done_count}/{n}] {test_name}{issues_tag}")
+                raw_issues.extend(per_file)
+
+        _log(f"  All {n} reviews done [{_time.monotonic() - t0:.1f}s]")
 
     if not raw_issues:
+        _log("  Verdict pass…", end="")
         verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
+        _log(f" done [{_time.monotonic() - t0:.1f}s total]")
         return AlignmentReview(**verdict)
 
+    _log(f"  Confirmation pass ({len(raw_issues)} candidate issues)…", end="")
     confirmed = _confirmation_pass(
         prompt_md, raw_issues, test_files,
         max_tokens=max_confirm_tokens,
     )
+    _log(f" done ({len(confirmed)} confirmed)")
 
+    _log("  Verdict pass…", end="")
     review = _parse_issues(confirmed)
     verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=confirmed)
     review.confidence = verdict.get("confidence", "")
     review.verdict = verdict.get("verdict", "")
+    _log(f" done [{_time.monotonic() - t0:.1f}s total]")
     return review
 
 
@@ -157,14 +223,45 @@ def _load_prompt(task_dir: Path) -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
-def _load_test_files(task_dir: Path) -> list[tuple[str, str]]:
+def _load_test_files(task_dir: Path, *, language: str = "") -> list[tuple[str, str]]:
     tests_dir = task_dir / "tests"
     if not tests_dir.is_dir():
         return []
-    files = []
-    for test_path in sorted(tests_dir.glob("*.py")):
-        files.append((test_path.name, test_path.read_text(encoding="utf-8")))
+
+    if not language:
+        language = _detect_test_language(tests_dir)
+
+    if language == "typescript":
+        patterns = ("**/*.ts", "**/*.mts")
+    else:
+        patterns = ("**/*.py",)
+
+    seen: set[Path] = set()
+    files: list[tuple[str, str]] = []
+    for pattern in patterns:
+        for test_path in sorted(tests_dir.rglob(pattern.replace("**/", ""))):
+            if test_path in seen or not test_path.is_file():
+                continue
+            seen.add(test_path)
+            try:
+                rel = str(test_path.relative_to(tests_dir))
+            except ValueError:
+                rel = test_path.name
+            files.append((rel, test_path.read_text(encoding="utf-8")))
     return files
+
+
+def _detect_test_language(tests_dir: Path) -> str:
+    """Auto-detect language from the test files present."""
+    has_ts = any(tests_dir.rglob("*.ts"))
+    has_py = any(tests_dir.rglob("*.py"))
+    if has_ts and not has_py:
+        return "typescript"
+    if has_py and not has_ts:
+        return "python"
+    if has_ts:
+        return "typescript"
+    return "python"
 
 
 def _load_task_summary(task_dir: Path) -> str:

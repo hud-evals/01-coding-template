@@ -1,7 +1,7 @@
 [project]
 name = "coding-env"
 version = "0.1.0"
-description = "Coding environment and ast-pilot generator for 0-to-1 development tasks"
+description = "Coding environment and task generator for 0-to-1 development tasks on HUD"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.0.0",

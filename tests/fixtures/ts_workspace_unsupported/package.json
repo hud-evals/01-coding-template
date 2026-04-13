@@ -1,0 +1,10 @@
+{
+  "name": "unsupported-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "devDependencies": {
+    "typescript": "~5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

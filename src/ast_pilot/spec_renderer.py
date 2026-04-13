@@ -1,4 +1,4 @@
-"""Spec renderer: produce a Claire-style start.md from an Evidence store.
+"""Spec renderer: produce a Claire-style prompt.md from an Evidence store.
 
 Deterministic structure + Haiku 4.5 for prose-heavy sections.
 """
@@ -32,7 +32,7 @@ def render_start_md(
     output_path: str | Path | None = None,
     use_llm: bool = True,
 ) -> str:
-    """Render a complete Claire-style start.md from an Evidence store.
+    """Render a complete Claire-style prompt.md from an Evidence store.
 
     When *use_llm* is True, calls Haiku 4.5 for prose sections.
     When False, uses deterministic fallback prose (faster, no API key needed).

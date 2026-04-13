@@ -126,6 +126,8 @@ def stage_support_assets(tasks_root: Path, support_root: Path, requirements_path
                 if line and not line.startswith("#"):
                     requirements.add(line)
 
+        _preinstall_node_modules(task_dir)
+
     if requirements:
         requirements_path.write_text(
             "\n".join(sorted(requirements)) + "\n",
@@ -133,6 +135,72 @@ def stage_support_assets(tasks_root: Path, support_root: Path, requirements_path
         )
     elif requirements_path.exists():
         requirements_path.unlink()
+
+
+def _node_install_fingerprint(config_dir: Path) -> str:
+    """Compute a fingerprint from install-relevant config files."""
+    h = hashlib.sha256()
+    for name in ("package.json", "package-lock.json", ".npmrc"):
+        src = config_dir / name
+        if src.exists():
+            h.update(name.encode("utf-8"))
+            h.update(src.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def _preinstall_node_modules(task_dir: Path) -> None:
+    """Pre-install node_modules for TypeScript tasks at image build time."""
+    config_dir = task_dir / "config"
+    pkg_json = config_dir / "package.json"
+    if not pkg_json.exists():
+        return
+
+    slug = task_dir.name
+    task_py = task_dir / "task.py"
+    if task_py.exists():
+        match = _TASK_SLUG_RE.search(task_py.read_text(encoding="utf-8", errors="replace"))
+        if match:
+            slug = match.group("slug")
+
+    cache_dir = Path(f"/tmp/ast_pilot_node_{slug}_modules")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    fingerprint = _node_install_fingerprint(config_dir)
+    marker = cache_dir / ".installed"
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == fingerprint:
+        print(f"  [node] node_modules cache is current for {task_dir.name}")
+        return
+
+    shutil.copy2(pkg_json, cache_dir / "package.json")
+    lockfile = config_dir / "package-lock.json"
+    if lockfile.exists():
+        shutil.copy2(lockfile, cache_dir / "package-lock.json")
+    npmrc = config_dir / ".npmrc"
+    if npmrc.exists():
+        shutil.copy2(npmrc, cache_dir / ".npmrc")
+
+    import subprocess
+    result = subprocess.run(
+        ["npm", "ci", "--ignore-scripts"],
+        cwd=str(cache_dir),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        print(f"  [node] npm ci failed for {task_dir.name}, falling back to npm install")
+        result = subprocess.run(
+            ["npm", "install", "--legacy-peer-deps", "--ignore-scripts"],
+            cwd=str(cache_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    if result.returncode == 0:
+        marker.write_text(fingerprint, encoding="utf-8")
+        print(f"  [node] Pre-installed node_modules for {task_dir.name}")
+    else:
+        print(f"  [node] WARNING: npm install failed for {task_dir.name}: {result.stderr[:200]}")
 
 
 def main() -> None:
