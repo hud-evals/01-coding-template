@@ -360,7 +360,7 @@ def _pkg_name(name: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="ast-pilot",
-        description="Scan Python repos and generate Claire-style task specs + HUD v5 graders",
+        description="Generate HUD coding tasks from Python and TypeScript source modules",
     )
     sub = parser.add_subparsers(dest="command")
 
