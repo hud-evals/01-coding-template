@@ -232,7 +232,7 @@ def _collect_small_test_support_modules(
 def _load_prompt(output_root: Path, project_name: str, prompt_md: str | None = None) -> str:
     if prompt_md is not None:
         return prompt_md
-    start_md = output_root / "start.md"
+    start_md = output_root / "prompt.md"
     if start_md.exists():
         return start_md.read_text(encoding="utf-8")
     raise ValueError(

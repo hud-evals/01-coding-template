@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +21,9 @@ VITEST_CONFIG_NAMES = (
 )
 
 TSCONFIG_NAMES = ("tsconfig.json", "tsconfig.build.json")
+
+_SETUP_FILES_RE = re.compile(r"""setupFiles\s*:\s*\[([^\]]*)\]""", re.DOTALL)
+_STRING_LITERAL_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,10 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
     except (json.JSONDecodeError, OSError) as exc:
         raise ValueError(f"Could not read {pkg_path}: {exc}") from exc
 
+    if not (root / "package-lock.json").exists():
+        _auto_generate_lockfile(root)
     has_lockfile = (root / "package-lock.json").exists()
+
     tsconfig = _find_first(root, TSCONFIG_NAMES)
     vitest_config = _find_first(root, VITEST_CONFIG_NAMES)
     test_runner = _detect_test_runner(pkg, vitest_config)
@@ -77,13 +86,17 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
     if pkg.get("workspaces"):
         unsupported.append("Monorepo workspaces are not supported in v0 TypeScript mode.")
     if not has_lockfile:
-        unsupported.append("package-lock.json is required for deterministic grading (npm ci).")
+        unsupported.append(
+            "package-lock.json is required and could not be auto-generated. "
+            "Ensure npm is installed and package.json is valid."
+        )
     if test_runner not in ("vitest",):
         unsupported.append(
             f"Test runner '{test_runner}' is not yet supported. Only Vitest is supported in v0."
         )
 
     _check_path_aliases(root, tsconfig, unsupported)
+    _check_vitest_config_local_refs(root, vitest_config, unsupported)
 
     return NodeRepoContext(
         root=root,
@@ -96,6 +109,34 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
         node_version_floor=node_version,
         unsupported_reasons=unsupported,
     )
+
+
+def _auto_generate_lockfile(root: Path) -> None:
+    """Auto-generate package-lock.json when missing (e.g. pnpm/yarn repos)."""
+    pkg_json = root / "package.json"
+    if not pkg_json.exists():
+        return
+    print(f"  [node] No package-lock.json found, generating from package.json...", file=sys.stderr)
+    import tempfile
+    env = {**__import__("os").environ, "NPM_CONFIG_CACHE": tempfile.mkdtemp(prefix="ast_pilot_npm_")}
+    try:
+        result = subprocess.run(
+            ["npm", "install", "--package-lock-only", "--legacy-peer-deps", "--ignore-scripts"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        if result.returncode == 0:
+            print(f"  [node] Generated package-lock.json", file=sys.stderr)
+        else:
+            msg = result.stderr.strip()[:200] if result.stderr else "unknown error"
+            print(f"  [node] Failed to generate package-lock.json: {msg}", file=sys.stderr)
+    except FileNotFoundError:
+        print(f"  [node] npm not found on PATH, cannot generate package-lock.json", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"  [node] Timed out generating package-lock.json", file=sys.stderr)
 
 
 def _find_first(root: Path, names: tuple[str, ...]) -> Path | None:
@@ -137,7 +178,47 @@ def _check_path_aliases(root: Path, tsconfig_path: Path | None, unsupported: lis
         )
 
 
+def _check_vitest_config_local_refs(
+    root: Path, vitest_config: Path | None, unsupported: list[str]
+) -> None:
+    """Detect local setupFiles or plugin imports in vitest/vite config that we cannot safely bundle."""
+    if vitest_config is None:
+        return
+    try:
+        content = vitest_config.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    setup_match = _SETUP_FILES_RE.search(content)
+    if setup_match:
+        inner = setup_match.group(1)
+        for lit_match in _STRING_LITERAL_RE.finditer(inner):
+            ref = lit_match.group(1)
+            if ref.startswith("./") or ref.startswith("../"):
+                target = (vitest_config.parent / ref).resolve()
+                if not target.exists():
+                    found = False
+                    for ext in (".ts", ".mts", ".js", ".mjs"):
+                        if target.with_suffix(ext).exists():
+                            found = True
+                            break
+                    if not found:
+                        unsupported.append(
+                            f"Vitest config references local setupFile '{ref}' "
+                            "which could not be resolved. Local config helpers "
+                            "are not yet supported."
+                        )
+
+
 def collect_node_dependencies(pkg: dict) -> list[str]:
     """Collect runtime dependency names from package.json."""
     deps = pkg.get("dependencies", {})
     return sorted(deps.keys())
+
+
+def collect_all_declared_deps(pkg: dict) -> set[str]:
+    """Collect all dependency names across all sections of package.json."""
+    all_deps: set[str] = set()
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        all_deps.update(pkg.get(key, {}).keys())
+    return all_deps

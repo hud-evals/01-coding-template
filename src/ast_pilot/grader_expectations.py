@@ -94,11 +94,28 @@ class GapReport:
         return "\n".join(sections)
 
 
-def extract_grader_expectations(test_files: list[tuple[str, str]]) -> GraderExpectations:
+def extract_grader_expectations(
+    test_files: list[tuple[str, str]],
+    *,
+    language: str = "",
+) -> GraderExpectations:
     """Extract all concrete expectations from test file contents.
 
     *test_files* is a list of ``(filename, content)`` tuples.
+    *language* can be ``"python"`` or ``"typescript"``; auto-detected from
+    file extensions when empty.
     """
+    if not language:
+        for fname, _ in test_files:
+            if fname.endswith((".ts", ".mts")):
+                language = "typescript"
+                break
+        else:
+            language = "python"
+
+    if language == "typescript":
+        return _extract_ts_expectations(test_files)
+
     expectations = GraderExpectations()
 
     for _filename, content in test_files:
@@ -115,14 +132,14 @@ def extract_grader_expectations(test_files: list[tuple[str, str]]) -> GraderExpe
     return expectations
 
 
-def extract_prompt_surface(prompt_md: str) -> PromptSurface:
+def extract_prompt_surface(prompt_md: str, *, language: str = "") -> PromptSurface:
     """Extract the API surface mentioned in a prompt markdown."""
     surface = PromptSurface()
 
     for m in re.finditer(r"`(\w+)(?:\([^)]*\))?`", prompt_md):
         surface.mentioned_symbols.add(m.group(1))
 
-    for m in re.finditer(r"(?:def|class)\s+(\w+)", prompt_md):
+    for m in re.finditer(r"(?:def|class|function|interface|type)\s+(\w+)", prompt_md):
         surface.code_block_defs.add(m.group(1))
         surface.mentioned_symbols.add(m.group(1))
 
@@ -135,20 +152,86 @@ def extract_prompt_surface(prompt_md: str) -> PromptSurface:
     for m in re.finditer(r"import\s+([\w.]+)", prompt_md):
         surface.mentioned_modules.add(m.group(1))
 
-    for m in re.finditer(r"`([\w.]+\.py)`", prompt_md):
-        stem = m.group(1).replace(".py", "")
+    for m in re.finditer(r"import\s+\{([^}]+)\}\s+from", prompt_md):
+        for name in m.group(1).split(","):
+            name = name.strip().split(" as ")[0].strip()
+            if name:
+                surface.mentioned_symbols.add(name)
+
+    for m in re.finditer(r"`([\w.]+\.(?:py|ts|mts))`", prompt_md):
+        stem = re.sub(r"\.(py|ts|mts)$", "", m.group(1))
         surface.mentioned_modules.add(stem)
 
     for m in re.finditer(r"(\w+)\.(\w+)", prompt_md):
         surface.mentioned_symbols.add(m.group(1))
         surface.mentioned_symbols.add(m.group(2))
 
+    for m in re.finditer(r"(\w+)\??\s*:\s*", prompt_md):
+        surface.mentioned_symbols.add(m.group(1))
+
     return surface
+
+
+_TS_NOISE = {
+    # test framework
+    "describe", "it", "test", "expect", "vi", "beforeEach", "afterEach",
+    "beforeAll", "afterAll", "jest", "vitest", "assert",
+    "toBe", "toEqual", "toStrictEqual", "toThrow", "toThrowError",
+    "toBeUndefined", "toBeDefined", "toBeNull", "toBeTruthy", "toBeFalsy",
+    "toContain", "toHaveLength", "toHaveProperty", "toMatch", "toMatchObject",
+    "toHaveBeenCalled", "toHaveBeenCalledWith", "toHaveBeenCalledTimes",
+    "toMatchInlineSnapshot", "toMatchSnapshot", "toHaveReturnedWith",
+    "spyOn", "fn", "mock", "mockReturnValue", "mockImplementation",
+    "each", "skip", "only", "todo", "concurrent", "fails",
+    "expectTypeOf", "assertType",
+    # JS keywords / operators the regex picks up
+    "if", "else", "for", "while", "do", "switch", "case", "break",
+    "continue", "return", "throw", "try", "catch", "finally",
+    "new", "delete", "typeof", "instanceof", "in", "of", "void",
+    "var", "let", "const", "function", "class", "extends", "super",
+    "import", "export", "default", "as", "from", "async", "await",
+    "yield", "with", "debugger",
+    # primitives / builtin types
+    "any", "undefined", "null", "true", "false",
+    "string", "number", "boolean", "object", "symbol", "bigint", "never", "unknown",
+    # builtin globals
+    "Array", "Map", "Set", "Date", "Error", "RegExp", "Promise", "WeakMap", "WeakSet",
+    "Int8Array", "Uint8Array", "Int16Array", "Uint16Array",
+    "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+    "BigInt64Array", "BigUint64Array", "ArrayBuffer", "SharedArrayBuffer", "DataView",
+    "Proxy", "Reflect", "Symbol", "Intl", "WeakRef", "FinalizationRegistry",
+    "console", "log", "warn", "error", "info", "debug", "trace",
+    "JSON", "Math", "Object", "String", "Number", "Boolean",
+    "require", "module", "exports", "process",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "Buffer", "URL", "TextEncoder", "TextDecoder",
+    # common builtin methods / properties
+    "length", "push", "pop", "shift", "unshift", "splice", "slice", "concat",
+    "map", "filter", "reduce", "find", "findIndex", "some", "every", "flat", "flatMap",
+    "sort", "reverse", "indexOf", "includes", "join", "fill",
+    "keys", "values", "entries", "has", "get", "set", "delete", "clear", "add",
+    "toString", "valueOf", "constructor", "prototype", "__proto__",
+    "bind", "call", "apply",
+    "then", "catch", "resolve", "reject", "all", "allSettled", "race", "any",
+    "assign", "create", "defineProperty", "freeze", "isFrozen",
+    "getPrototypeOf", "setPrototypeOf", "getOwnPropertyDescriptor",
+    "is", "isArray", "isNaN", "isFinite", "isInteger", "isSafeInteger",
+    "from", "of", "parse", "stringify",
+    "name", "message", "stack", "cause", "code",
+    "configurable", "enumerable", "writable", "value",
+    "iterator", "toStringTag", "hasInstance", "toPrimitive",
+    # short generic identifiers that are always test-data noise
+    "ext", "num", "arr", "obj", "val", "res", "ret", "tmp", "str", "msg",
+    "foo", "bar", "baz", "qux", "boo",
+    "deep", "nested",
+}
 
 
 def compute_gaps(
     expectations: GraderExpectations,
     surface: PromptSurface,
+    *,
+    language: str = "",
 ) -> GapReport:
     """Compare grader expectations against prompt surface and find gaps."""
     report = GapReport()
@@ -179,6 +262,9 @@ def compute_gaps(
         "parent", "name", "stem", "suffix",
     }
 
+    if language == "typescript":
+        NOISE |= _TS_NOISE
+
     all_prompt = surface.mentioned_symbols | surface.code_block_defs
 
     for name in expectations.imported_names:
@@ -192,6 +278,8 @@ def compute_gaps(
         method_name = parts[-1] if parts else method
         if method_name in NOISE or method_name.startswith("_"):
             continue
+        if language == "typescript" and any(p in NOISE for p in parts):
+            continue
         if method_name not in all_prompt and method not in all_prompt:
             report.methods_not_in_prompt.append(method)
 
@@ -199,6 +287,10 @@ def compute_gaps(
         parts = attr.split(".")
         attr_name = parts[-1] if parts else attr
         if attr_name in NOISE or attr_name.startswith("_"):
+            continue
+        if language == "typescript" and any(p in NOISE for p in parts):
+            continue
+        if language == "typescript" and len(attr_name) <= 3:
             continue
         if attr_name not in all_prompt and attr not in all_prompt:
             report.attributes_not_in_prompt.append(attr)
@@ -297,6 +389,69 @@ def _resolve_attr_chain(node: ast.Attribute) -> str:
         if parent:
             return f"{parent}.{node.attr}"
     return node.attr
+
+
+def _extract_ts_expectations(test_files: list[tuple[str, str]]) -> GraderExpectations:
+    """Regex-based extraction of grader expectations from TypeScript test files."""
+    exp = GraderExpectations()
+
+    _TS_IMPORT_RE = re.compile(
+        r"""import\s+(?:type\s+)?"""
+        r"""(?:\{([^}]+)\}\s+from|([A-Za-z_$]\w*)\s+from|\*\s+as\s+(\w+)\s+from)"""
+        r"""\s+['"]([^'"]+)['"]"""
+    )
+    _TS_CALL_RE = re.compile(r"(\w+(?:\.\w+)*)\s*\(")
+    _TS_MEMBER_RE = re.compile(r"(\w+)\.(\w+)")
+    _TS_NEW_RE = re.compile(r"new\s+(\w+)\s*\(")
+    _TS_STRING_RE = re.compile(r"""['"](\w[\w.-]{2,})['"]""")
+    _TS_EXPECT_RE = re.compile(r"(?:toBe|toEqual|toStrictEqual)\s*\(\s*(.+?)\s*\)")
+    _TS_OBJ_PROP_RE = re.compile(r"(\w+)\s*:")
+
+    for _filename, content in test_files:
+        for m in _TS_IMPORT_RE.finditer(content):
+            named = m.group(1)
+            default = m.group(2)
+            namespace = m.group(3)
+            module = m.group(4)
+            exp.imported_modules.append(module)
+            if named:
+                for name in named.split(","):
+                    name = name.strip().split(" as ")[0].strip()
+                    if name and name != "type":
+                        exp.imported_names.append(name)
+            if default:
+                exp.imported_names.append(default)
+            if namespace:
+                exp.imported_names.append(namespace)
+
+        for m in _TS_CALL_RE.finditer(content):
+            chain = m.group(1)
+            exp.called_methods.append(chain)
+            parts = chain.split(".")
+            if len(parts) > 1:
+                exp.accessed_attributes.append(chain)
+
+        for m in _TS_MEMBER_RE.finditer(content):
+            exp.accessed_attributes.append(f"{m.group(1)}.{m.group(2)}")
+
+        for m in _TS_NEW_RE.finditer(content):
+            exp.instantiated_classes.append(m.group(1))
+
+        for m in _TS_STRING_RE.finditer(content):
+            val = m.group(1)
+            if 3 <= len(val) <= 200:
+                exp.string_literals.append(val)
+
+        for m in _TS_EXPECT_RE.finditer(content):
+            exp.asserted_values.append(m.group(1).strip())
+
+        for m in _TS_OBJ_PROP_RE.finditer(content):
+            prop = m.group(1)
+            if len(prop) >= 3 and not prop[0].isupper():
+                exp.accessed_attributes.append(prop)
+
+    _dedupe(exp)
+    return exp
 
 
 def _dedupe(exp: GraderExpectations) -> None:

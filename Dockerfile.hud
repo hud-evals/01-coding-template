@@ -36,6 +36,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 ENV HOME=/home/ubuntu
 
+# Ensure npm cache is owned by ubuntu so agents can use npm if needed
+RUN mkdir -p /home/ubuntu/.npm && chown -R ubuntu:ubuntu /home/ubuntu/.npm
+
 # Configure git for the ubuntu user
 USER ubuntu
 RUN git config --global user.email "agent@example.com" \

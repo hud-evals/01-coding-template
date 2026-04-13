@@ -61,7 +61,7 @@ def cmd_spec(args: argparse.Namespace) -> None:
     from .evidence import Evidence
 
     ev = Evidence.load(args.evidence)
-    out = args.output or "start.md"
+    out = args.output or "prompt.md"
     use_llm = not args.no_llm
 
     if ev.language == "typescript":
@@ -80,7 +80,7 @@ def cmd_bundle(args: argparse.Namespace) -> None:
 
     ev = Evidence.load(args.evidence)
     out_dir, cleanup_after_success = _prepare_bundle_root(args.output, ev.project_name)
-    prompt_path = Path(args.prompt) if args.prompt else Path(args.evidence).with_name("start.md")
+    prompt_path = Path(args.prompt) if args.prompt else Path(args.evidence).with_name("prompt.md")
     prompt_md = _load_validated_prompt(ev, prompt_path)
     source_paths = [mod.path for mod in ev.source_files]
     test_paths = sorted({test.test_file for test in ev.tests})
@@ -169,17 +169,17 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     ev.save(out_dir / "evidence.json")
 
-    print(f"\n=== Generating start.md {'(with LLM)' if use_llm else '(deterministic)'} ===")
-    md = render_start_md(ev, output_path=out_dir / "start.md", use_llm=use_llm)
+    print(f"\n=== Generating prompt.md {'(with LLM)' if use_llm else '(deterministic)'} ===")
+    md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
     print(f"  {len(md)} chars written")
 
-    print("\n=== Validating start.md against evidence ===")
+    print("\n=== Validating prompt.md against evidence ===")
     if language == "typescript":
         from .node_validator import validate
     else:
         from .validator import validate
 
-    vr = validate(ev, out_dir / "start.md")
+    vr = validate(ev, out_dir / "prompt.md")
     print(f"  {vr.summary()}")
 
     max_fix_rounds = 3
@@ -194,7 +194,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         from .validator import ValidationResult
 
         filtered_vr = ValidationResult(issues=real_errors)
-        _, actions = fix_issues(ev, out_dir / "start.md", filtered_vr)
+        _, actions = fix_issues(ev, out_dir / "prompt.md", filtered_vr)
         for a in actions:
             status = a.action.upper()
             if a.action == "fixed":
@@ -209,7 +209,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 print(f"  [{status}] {a.issue.message}: {a.reason}")
 
         print(f"\n=== Re-validating (round {fix_round}) ===")
-        vr = validate(ev, out_dir / "start.md")
+        vr = validate(ev, out_dir / "prompt.md")
         remaining = _undismissed_errors(vr, dismissed_keys)
         if remaining:
             print(f"  {len(remaining)} errors remaining")
@@ -220,7 +220,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     remaining_errors = _undismissed_errors(vr, dismissed_keys)
     if remaining_errors:
-        print("\nValidation failed: unresolved factual errors remain in start.md.")
+        print("\nValidation failed: unresolved factual errors remain in prompt.md.")
         print("Refusing to generate a task bundle until the prompt matches the extracted evidence.")
         for issue in remaining_errors:
             print(f"  [ERROR] {issue.message}")
@@ -373,15 +373,15 @@ def main() -> None:
     p_scan.add_argument("--language", help="Source language (python|typescript). Auto-inferred from file extensions when omitted.")
     p_scan.set_defaults(func=cmd_scan)
 
-    p_spec = sub.add_parser("spec", help="Generate start.md from evidence.json")
+    p_spec = sub.add_parser("spec", help="Generate prompt.md from evidence.json")
     p_spec.add_argument("evidence", help="Path to evidence.json")
-    p_spec.add_argument("--output", "-o", help="Output path (default: start.md)")
+    p_spec.add_argument("--output", "-o", help="Output path (default: prompt.md)")
     p_spec.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
     p_spec.set_defaults(func=cmd_spec)
 
     p_bundle = sub.add_parser("bundle", help="Generate HUD v5 grader bundle from evidence.json")
     p_bundle.add_argument("evidence", help="Path to evidence.json")
-    p_bundle.add_argument("--prompt", help="Path to validated prompt markdown (default: sibling start.md)")
+    p_bundle.add_argument("--prompt", help="Path to validated prompt markdown (default: sibling prompt.md)")
     p_bundle.add_argument("--output", "-o", help="Optional bundle root to keep generated artifacts")
     p_bundle.add_argument("--no-llm", action="store_true", help="Skip LLM calls")
     p_bundle.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")

@@ -16,6 +16,7 @@ from .evidence import (
     ClassInfo,
     Evidence,
     FunctionInfo,
+    InterfaceInfo,
     ModuleInfo,
     Parameter,
     TestEvidence,
@@ -41,7 +42,7 @@ def scan_typescript(
         reasons = "\n".join(f"  - {r}" for r in ctx.unsupported_reasons)
         raise SystemExit(
             f"TypeScript project at {ctx.root} is not supported:\n{reasons}\n"
-            "See USAGE.md for the supported TypeScript project matrix."
+            "See README.md for the supported TypeScript project matrix."
         )
 
     raw = _run_node_scanner(resolved_sources, resolved_tests)
@@ -138,6 +139,14 @@ def _module_from_dict(m: dict) -> ModuleInfo:
         for method in c.get("methods", []):
             ci.methods.append(_func_from_dict(method))
         mod.classes.append(ci)
+    for iface in m.get("interfaces", []):
+        mod.interfaces.append(InterfaceInfo(
+            name=iface["name"],
+            module=iface.get("module", ""),
+            lineno=iface.get("lineno", 0),
+            members=[(mb[0], mb[1]) for mb in iface.get("members", [])],
+            is_type_alias=iface.get("is_type_alias", False),
+        ))
     return mod
 
 
@@ -162,13 +171,23 @@ def _func_from_dict(f: dict) -> FunctionInfo:
 
 
 def _collect_config_files(ctx) -> list[str]:
+    root = ctx.root
     files = ["package.json"]
     if ctx.has_lockfile:
         files.append("package-lock.json")
+    npmrc = root / ".npmrc"
+    if npmrc.exists():
+        files.append(".npmrc")
     if ctx.tsconfig_path:
-        files.append(ctx.tsconfig_path.name)
+        try:
+            files.append(str(ctx.tsconfig_path.relative_to(root)))
+        except ValueError:
+            files.append(ctx.tsconfig_path.name)
     if ctx.vitest_config_path:
-        files.append(ctx.vitest_config_path.name)
+        try:
+            files.append(str(ctx.vitest_config_path.relative_to(root)))
+        except ValueError:
+            files.append(ctx.vitest_config_path.name)
     return files
 
 

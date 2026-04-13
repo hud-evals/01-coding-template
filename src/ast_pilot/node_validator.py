@@ -1,6 +1,6 @@
 """Validator for TypeScript task prompts.
 
-Cross-checks a generated start.md against the TypeScript evidence store.
+Cross-checks a generated prompt.md against the TypeScript evidence store.
 Catches factual errors the LLM introduced: wrong param names, wrong return
 types, invented symbols, wrong constant values.
 """
@@ -16,7 +16,7 @@ from .validator import ValidationIssue, ValidationResult
 
 
 def validate(ev: Evidence, md_path: str | Path) -> ValidationResult:
-    """Validate a generated start.md against TypeScript evidence."""
+    """Validate a generated prompt.md against TypeScript evidence."""
     md = Path(md_path).read_text(encoding="utf-8")
     md_lines = md.splitlines()
     result = ValidationResult()
@@ -25,7 +25,10 @@ def validate(ev: Evidence, md_path: str | Path) -> ValidationResult:
     _check_param_names(ev, md, md_lines, result)
     _check_return_types(ev, md, md_lines, result)
     _check_constant_values(ev, md, md_lines, result)
+    _check_field_counts(ev, md, md_lines, result)
+    _check_string_literals(ev, md, md_lines, result)
     _check_no_invented_symbols(ev, md, md_lines, result)
+    _check_interface_members(ev, md, result)
 
     return result
 
@@ -35,7 +38,7 @@ def _check_symbols_exist(ev: Evidence, md: str, result: ValidationResult) -> Non
         for cls in mod.classes:
             if cls.name not in md:
                 result.issues.append(
-                    ValidationIssue("error", "symbols", f"exported class '{cls.name}' not mentioned in start.md")
+                    ValidationIssue("error", "symbols", f"exported class '{cls.name}' not mentioned in prompt.md")
                 )
             for method in cls.methods:
                 if method.name.startswith("_"):
@@ -48,7 +51,7 @@ def _check_symbols_exist(ev: Evidence, md: str, result: ValidationResult) -> Non
         for fn in mod.functions:
             if fn.name not in md:
                 result.issues.append(
-                    ValidationIssue("error", "symbols", f"exported function '{fn.name}' not mentioned in start.md")
+                    ValidationIssue("error", "symbols", f"exported function '{fn.name}' not mentioned in prompt.md")
                 )
 
 
@@ -134,6 +137,121 @@ def _check_constant_values(ev: Evidence, md: str, md_lines: list[str], result: V
                     )
 
 
+def _check_field_counts(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    for mod in ev.source_files:
+        for cls in mod.classes:
+            actual_fields = len(cls.class_variables)
+            if actual_fields == 0:
+                continue
+            for i, line in enumerate(md_lines):
+                m = re.search(r"(\d+)\s+fields?", line)
+                window = md_lines[max(0, i - 2): i + 1]
+                if m and any(cls.name.lower() in candidate.lower() for candidate in window):
+                    claimed = int(m.group(1))
+                    if claimed != actual_fields:
+                        result.issues.append(
+                            ValidationIssue(
+                                "error",
+                                "field_count",
+                                f"'{cls.name}': md claims {claimed} fields, evidence has {actual_fields}",
+                                line=i + 1,
+                            )
+                        )
+
+
+def _check_string_literals(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
+    all_literals: set[str] = set()
+    for mod in ev.source_files:
+        all_literals.update(mod.string_literals)
+
+    if not all_literals:
+        return
+
+    known_names: set[str] = set()
+    for mod in ev.source_files:
+        known_names.add(mod.module_name)
+        for fn in mod.functions:
+            known_names.add(fn.name)
+            for p in fn.params:
+                known_names.add(p.name)
+        for cls in mod.classes:
+            known_names.add(cls.name)
+            for v, _ in cls.class_variables:
+                known_names.add(v)
+            for m in cls.methods:
+                known_names.add(m.name)
+                for p in m.params:
+                    known_names.add(p.name)
+        for iface in getattr(mod, "interfaces", []):
+            known_names.add(iface.name)
+            for mname, _ in iface.members:
+                known_names.add(mname)
+        for name, _ in mod.constants:
+            known_names.add(name)
+
+    key_patterns = [
+        r'(?:entry|dict|data|payload|obj|item|result|record)\["(\w+)"\]',
+        r'"(\w+)"\s+key\b',
+        r'\bkey\s+"(\w+)"',
+        r'(?:a|the|with a)\s+"(\w+)"\s+(?:key|field)',
+        r"'(\w+)'\s+key\b",
+        r"\bkey\s+'(\w+)'",
+    ]
+
+    current_section = ""
+    in_code_block = False
+
+    for i, line in enumerate(md_lines):
+        stripped = line.strip()
+        if not in_code_block and stripped.startswith("## "):
+            current_section = stripped[3:].strip()
+
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block and current_section == "Implementation Notes":
+            continue
+
+        for pattern in key_patterns:
+            for m in re.finditer(pattern, line):
+                mentioned = m.group(1)
+                if len(mentioned) < 3:
+                    continue
+                if mentioned in all_literals or mentioned in known_names:
+                    continue
+                candidates = [lit for lit in all_literals if len(lit) > 3 and lit not in known_names]
+                if candidates:
+                    result.issues.append(
+                        ValidationIssue(
+                            "error",
+                            "string_literal",
+                            f'md mentions key "{mentioned}" which is not in the source. '
+                            f'Source dict keys include: {", ".join(sorted(candidates)[:5])}',
+                            line=i + 1,
+                        )
+                    )
+
+
+def _check_interface_members(ev: Evidence, md: str, result: ValidationResult) -> None:
+    """Check that exported interface member names in evidence appear in the prompt."""
+    for mod in ev.source_files:
+        for iface in getattr(mod, "interfaces", []):
+            if iface.is_type_alias:
+                continue
+            if iface.name not in md:
+                continue
+            for mname, _ in iface.members:
+                if mname not in md:
+                    result.issues.append(
+                        ValidationIssue(
+                            "warning",
+                            "interface_member",
+                            f"interface '{iface.name}' member '{mname}' not mentioned in prompt",
+                        )
+                    )
+
+
 def _check_no_invented_symbols(ev: Evidence, md: str, md_lines: list[str], result: ValidationResult) -> None:
     known_symbols: set[str] = set()
     for mod in ev.source_files:
@@ -143,6 +261,10 @@ def _check_no_invented_symbols(ev: Evidence, md: str, md_lines: list[str], resul
             known_symbols.add(cls.name)
             for m in cls.methods:
                 known_symbols.add(m.name)
+        for iface in getattr(mod, "interfaces", []):
+            known_symbols.add(iface.name)
+            for mname, _ in iface.members:
+                known_symbols.add(mname)
 
     in_code_block = False
     for i, line in enumerate(md_lines):

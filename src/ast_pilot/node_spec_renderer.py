@@ -1,6 +1,6 @@
 """Spec renderer for TypeScript projects.
 
-Produces a Claire-style start.md adapted for TypeScript/Node tasks.
+Produces a Claire-style prompt.md adapted for TypeScript/Node tasks.
 Deterministic structure with optional LLM prose sections.
 """
 
@@ -94,6 +94,7 @@ def _section_instructions(ev: Evidence, use_llm: bool) -> str:
 
 CRITICAL RULES:
 - The solution files live directly in `{WORKSPACE_DIR}`. Do NOT tell the agent to rely on npm-linked packages or hidden paths.
+- Do NOT run `npm install`, `npx`, or any package manager commands. All dependencies and testing infrastructure are pre-configured. Just create the source files.
 - Hidden tests import the implementation from these module file(s): {target_files}.
 - Every symbol in the REQUIRED TESTED SYMBOLS section below must exist, including private helpers prefixed with underscore.
 - You MUST use the EXACT function/method signatures provided below. Do NOT change parameter names, types, defaults, or return types.
@@ -122,6 +123,7 @@ Start with "## Natural Language Instructions" and include a short bullet list of
     lines = ["## Natural Language Instructions", ""]
     lines.append("Before you start:")
     lines.append(f"- Create and edit the solution directly in `{WORKSPACE_DIR}`.")
+    lines.append("- Do NOT run `npm install`, `npx`, or any package manager commands. All dependencies and testing infrastructure are pre-configured. Just create the source files.")
     lines.append(f"- The hidden tests import these module file(s): {target_files}.")
     lines.append("- Implement every symbol listed in `Required Tested Symbols`.")
     lines.append("- All code must be valid TypeScript.")
@@ -133,7 +135,12 @@ Start with "## Natural Language Instructions" and include a short bullet list of
     req_num = 1
     for mod in ev.source_files:
         for cls in mod.classes:
-            lines.append(f"{req_num}. Implement the `{cls.name}` class with all its methods:")
+            lines.append(f"{req_num}. Implement the `{cls.name}` class with all its fields and methods:")
+            for vname, vtype in cls.class_variables:
+                if vtype:
+                    lines.append(f"   - `{vname}: {vtype}`")
+                else:
+                    lines.append(f"   - `{vname}`")
             for m in cls.methods:
                 lines.append(f"   - `{m.name}({_format_params_compact(m)})`")
             req_num += 1
@@ -156,7 +163,7 @@ def _section_required_symbols(ev: Evidence) -> str:
     if not items:
         return ""
     lines = ["## Required Tested Symbols", ""]
-    lines.append("The hidden tests import every symbol listed here. Implement all of them.")
+    lines.append("The hidden tests import or access every symbol listed here. Implement all of them.")
     lines.append("")
     for item in items:
         lines.append(f"- `{item}`")
@@ -173,10 +180,17 @@ def _build_required_symbol_items(ev: Evidence) -> list[str]:
                 all_exported.append(fn.name)
             for cls in mod.classes:
                 all_exported.append(cls.name)
+                for name, _ in cls.class_variables:
+                    all_exported.append(f"{cls.name}.{name}")
+            for iface in mod.interfaces:
+                all_exported.append(iface.name)
+                for mname, _ in iface.members:
+                    all_exported.append(f"{iface.name}.{mname}")
         return all_exported if all_exported else []
 
     items: list[str] = []
     seen: set[str] = set()
+    matched_symbols: set[str] = set()
 
     def _append(item: str) -> None:
         if item not in seen:
@@ -187,15 +201,35 @@ def _build_required_symbol_items(ev: Evidence) -> list[str]:
         for cls in mod.classes:
             if cls.name in tested:
                 _append(f"class {cls.name}")
+                matched_symbols.add(cls.name)
+            for name, annotation in cls.class_variables:
+                if name in tested:
+                    _append(_format_required_field(name, owner=cls.name, annotation=annotation))
+                    matched_symbols.add(name)
             for method in cls.methods:
                 if method.name in tested:
                     _append(_format_required_symbol(method, owner=cls.name))
+                    matched_symbols.add(method.name)
         for fn in mod.functions:
             if fn.name in tested:
                 _append(_format_required_symbol(fn))
+                matched_symbols.add(fn.name)
+        for iface in mod.interfaces:
+            if iface.name in tested:
+                _append(f"interface {iface.name}")
+                matched_symbols.add(iface.name)
+            for mname, mtype in iface.members:
+                if mname in tested:
+                    ann = f": {mtype}" if mtype else ""
+                    _append(f"{iface.name}.{mname}{ann}")
+                    matched_symbols.add(mname)
         for name, _ in mod.constants:
             if name in tested:
                 _append(name)
+                matched_symbols.add(name)
+
+    for name in sorted(tested - matched_symbols):
+        _append(name)
     return items
 
 
@@ -213,6 +247,13 @@ def _format_required_symbol(fn: FunctionInfo, owner: str | None = None) -> str:
     return f"{prefix}function {name}({_format_params_str(fn)}){ret}"
 
 
+def _format_required_field(name: str, owner: str | None = None, annotation: str = "") -> str:
+    rendered = f"{owner}.{name}" if owner else name
+    if annotation:
+        return f"{rendered}: {annotation}"
+    return rendered
+
+
 # ---------------------------------------------------------------------------
 # Section 4: Environment Configuration
 # ---------------------------------------------------------------------------
@@ -227,6 +268,7 @@ def _section_environment(ev: Evidence) -> str:
     lines.append("### Workspace")
     lines.append("")
     lines.append(f"- Put the implementation directly under `{WORKSPACE_DIR}`.")
+    lines.append("- Do NOT run `npm install`, `npx`, or any package manager commands. All dependencies and testing infrastructure are pre-configured and handled automatically.")
     lines.append("- Your shell may start in a different current directory, so use absolute paths.")
     target_files = _workspace_target_files(ev)
     if target_files:
@@ -280,6 +322,8 @@ def _section_api_usage(ev: Evidence) -> str:
     for mod in ev.source_files:
         for cls in mod.classes:
             imports.append(cls.name)
+        for iface in mod.interfaces:
+            imports.append(iface.name)
         for fn in mod.functions:
             imports.append(fn.name)
         for name, _ in mod.constants:
@@ -312,8 +356,47 @@ def _section_api_usage(ev: Evidence) -> str:
             parts.append("```")
             parts.append("")
 
+            if cls.class_variables:
+                parts.append("**Class Variables:**")
+                for vname, vtype in cls.class_variables:
+                    if vtype:
+                        parts.append(f"- `{vname}: {vtype}`")
+                    else:
+                        parts.append(f"- `{vname}`")
+                parts.append("")
+
             for method in cls.methods:
                 parts.extend(_render_function_block(method, is_method=True))
+            section_num += 1
+
+    for mod in ev.source_files:
+        for iface in mod.interfaces:
+            if iface.is_type_alias:
+                parts.append(f"### {section_num}. `{iface.name}` Type Alias")
+                parts.append("")
+                parts.append("```typescript")
+                parts.append(f"export type {iface.name} = ...;")
+                parts.append("```")
+                parts.append("")
+            else:
+                parts.append(f"### {section_num}. `{iface.name}` Interface")
+                parts.append("")
+                parts.append("```typescript")
+                parts.append(f"export interface {iface.name} {{")
+                for mname, mtype in iface.members:
+                    ann = f": {mtype}" if mtype else ""
+                    parts.append(f"  {mname}?{ann};")
+                parts.append("}")
+                parts.append("```")
+                parts.append("")
+                if iface.members:
+                    parts.append("**Members:**")
+                    for mname, mtype in iface.members:
+                        if mtype:
+                            parts.append(f"- `{mname}: {mtype}`")
+                        else:
+                            parts.append(f"- `{mname}`")
+                    parts.append("")
             section_num += 1
 
     for mod in ev.source_files:
@@ -459,6 +542,9 @@ def _build_exact_api_listing(ev: Evidence) -> str:
         for cls in mod.classes:
             bases = f" extends {', '.join(cls.bases)}" if cls.bases else ""
             lines.append(f"export class {cls.name}{bases} {{")
+            for vname, vtype in cls.class_variables:
+                ann = f": {vtype}" if vtype else ""
+                lines.append(f"  {vname}{ann}")
             for m in cls.methods:
                 prefix = "async " if m.is_async else ""
                 static = "static " if m.is_staticmethod else ""
@@ -466,6 +552,17 @@ def _build_exact_api_listing(ev: Evidence) -> str:
                 ret = f": {m.return_annotation}" if m.return_annotation else ""
                 lines.append(f"  {static}{prefix}{m.name}({params}){ret}")
             lines.append("}")
+            lines.append("")
+
+        for iface in mod.interfaces:
+            if iface.is_type_alias:
+                lines.append(f"export type {iface.name} = ...;")
+            else:
+                lines.append(f"export interface {iface.name} {{")
+                for mname, mtype in iface.members:
+                    ann = f": {mtype}" if mtype else ""
+                    lines.append(f"  {mname}?{ann};")
+                lines.append("}")
             lines.append("")
 
         for fn in mod.functions:

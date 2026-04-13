@@ -101,6 +101,15 @@ def _format_issues(issues: list[AlignmentIssue]) -> str:
     return "\n\n".join(parts)
 
 
+def _validate_prompt(language: str, ev, prompt_path):
+    """Dispatch to the correct language-specific validator."""
+    if language == "typescript":
+        from . import node_validator
+        return node_validator.validate(ev, prompt_path)
+    from . import validator
+    return validator.validate(ev, prompt_path)
+
+
 def run_alignment_loop(
     task_dir: str | Path,
     ev,
@@ -114,7 +123,8 @@ def run_alignment_loop(
     after *max_rounds*, the caller should refuse to promote the task.
     """
     from .alignment_review import review_task_alignment
-    from .validator import validate
+
+    language = getattr(ev, "language", "python") or "python"
 
     task_dir = Path(task_dir)
     prompt_path = task_dir / "prompt.md"
@@ -123,7 +133,7 @@ def run_alignment_loop(
         return AlignmentReview()
 
     for round_num in range(1, max_rounds + 1):
-        review = review_task_alignment(task_dir)
+        review = review_task_alignment(task_dir, language=language)
 
         if review.is_clean:
             return review
@@ -143,11 +153,11 @@ def run_alignment_loop(
         prompt_path.write_text(fix_result.updated_prompt, encoding="utf-8")
         print(f"  [ALIGNMENT FIX round {round_num}] Applied fixes: {', '.join(fix_result.applied_issue_titles)}")
 
-        vr = validate(ev, prompt_path)
+        vr = _validate_prompt(language, ev, prompt_path)
         if vr.error_count > 0:
             print("  [ALIGNMENT ROLLBACK] Factual validation failed after fix — reverting prompt")
             prompt_path.write_text(prompt_md, encoding="utf-8")
             return review
 
-    final_review = review_task_alignment(task_dir)
+    final_review = review_task_alignment(task_dir, language=language)
     return final_review

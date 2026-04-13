@@ -1,4 +1,4 @@
-"""Validator: cross-check a generated start.md against the evidence store.
+"""Validator: cross-check a generated  against the evidence store.
 
 Catches factual errors the LLM introduced: wrong param names, wrong return
 types, invented symbols, wrong constant values, wrong dict key names.
@@ -64,7 +64,7 @@ class DocumentedSignature:
 
 
 def validate(ev: Evidence, md_path: str | Path) -> ValidationResult:
-    """Validate a generated start.md against its evidence store."""
+    """Validate a generated  against its evidence store."""
 
     md = Path(md_path).read_text(encoding="utf-8")
     md_lines = md.splitlines()
@@ -90,7 +90,7 @@ def _check_symbols_exist(ev: Evidence, md: str, md_lines: list[str], result: Val
                 continue
             if cls.name not in md:
                 result.issues.append(
-                    ValidationIssue("error", "symbols", f"public class '{cls.name}' not mentioned in start.md")
+                    ValidationIssue("error", "symbols", f"public class '{cls.name}' not mentioned in ")
                 )
             for method in cls.methods:
                 if method.name.startswith("_") and not method.name.startswith("__"):
@@ -105,7 +105,7 @@ def _check_symbols_exist(ev: Evidence, md: str, md_lines: list[str], result: Val
                 continue
             if fn.name not in md:
                 result.issues.append(
-                    ValidationIssue("error", "symbols", f"public function '{fn.name}' not mentioned in start.md")
+                    ValidationIssue("error", "symbols", f"public function '{fn.name}' not mentioned in ")
                 )
 
 

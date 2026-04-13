@@ -52,6 +52,17 @@ class ClassInfo:
 
 
 @dataclass
+class InterfaceInfo:
+    """Exported TypeScript interface or type alias with its member names."""
+
+    name: str
+    module: str
+    lineno: int
+    members: list[tuple[str, str]] = field(default_factory=list)
+    is_type_alias: bool = False
+
+
+@dataclass
 class ModuleInfo:
     path: str
     module_name: str
@@ -62,6 +73,7 @@ class ModuleInfo:
     constants: list[tuple[str, str]] = field(default_factory=list)
     functions: list[FunctionInfo] = field(default_factory=list)
     classes: list[ClassInfo] = field(default_factory=list)
+    interfaces: list[InterfaceInfo] = field(default_factory=list)
     string_literals: list[str] = field(default_factory=list)
     line_count: int = 0
 
@@ -173,6 +185,14 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
             for method in c.get("methods", []):
                 ci.methods.append(_func_from_dict(method))
             mod.classes.append(ci)
+        for iface in m.get("interfaces", []):
+            mod.interfaces.append(InterfaceInfo(
+                name=iface["name"],
+                module=iface.get("module", ""),
+                lineno=iface.get("lineno", 0),
+                members=[(mb[0], mb[1]) for mb in iface.get("members", [])],
+                is_type_alias=iface.get("is_type_alias", False),
+            ))
         ev.source_files.append(mod)
     for t in d.get("tests", []):
         ev.tests.append(
