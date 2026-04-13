@@ -23,3 +23,5 @@ output/
 ast_test/
 evidence*.json
 *.lock
+
+node_modules/

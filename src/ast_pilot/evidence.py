@@ -86,6 +86,14 @@ class Evidence:
     python_version: str = field(default_factory=_default_python_version)
     dependencies: list[str] = field(default_factory=list)
 
+    language: str = "python"
+    runtime: str = ""
+    runtime_version: str = ""
+    package_manager: str = ""
+    test_runner: str = ""
+    module_system: str = ""
+    config_files: list[str] = field(default_factory=list)
+
     def all_public_symbols(self) -> list[str]:
         symbols: list[str] = []
         for mod in self.source_files:
@@ -129,6 +137,13 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
         python_version=d.get("python_version", _default_python_version()),
         dependencies=d.get("dependencies", []),
         readme_sections=d.get("readme_sections", {}),
+        language=d.get("language", "python"),
+        runtime=d.get("runtime", ""),
+        runtime_version=d.get("runtime_version", ""),
+        package_manager=d.get("package_manager", ""),
+        test_runner=d.get("test_runner", ""),
+        module_system=d.get("module_system", ""),
+        config_files=d.get("config_files", []),
     )
     for m in d.get("source_files", []):
         mod = ModuleInfo(

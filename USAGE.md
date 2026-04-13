@@ -371,6 +371,51 @@ When `--no-llm` is passed, the alignment pass is skipped automatically.
 | `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | If set to `1`, allows the generator to downgrade unsupported hidden-test imports with `skip` or `xfail` instead of failing generation |
 | `CODING_GITHUB_TOKEN` | unset | Optional build secret for private repo clones in `Dockerfile.hud` |
 
+## Experimental TypeScript Support
+
+`ast-pilot` includes experimental support for generating HUD tasks from TypeScript source modules.
+
+### Supported Matrix
+
+- TypeScript source files (`.ts`)
+- `npm` with committed `package-lock.json`
+- Single-package repos only
+- Vitest test runner only
+
+### Not Supported (Yet)
+
+- JavaScript (`.js`) input files
+- Jest or `node:test`
+- Monorepo workspaces
+- `pnpm` or `yarn`
+- `tsconfig.json` path aliases
+- React / TSX / browser stacks
+
+### Usage
+
+```bash
+uv run ast-pilot run path/to/module.ts \
+    --tests path/to/module.test.ts \
+    --name my-ts-task
+```
+
+The language is auto-inferred from `.ts` file extensions. You can also be explicit:
+
+```bash
+uv run ast-pilot run path/to/module.ts \
+    --tests path/to/module.test.ts \
+    --name my-ts-task \
+    --language typescript
+```
+
+The generated task bundle uses `npm ci` + `vitest run` for grading instead of `pip install` + `pytest`.
+
+### Known Limitations
+
+- Post-bundle alignment auto-fix is not yet TypeScript-aware. The TS path runs deterministic validation only.
+- Hidden test support/rewriting is simpler than the Python backend. TS v0 copies test files as-is.
+- The runtime image must include Node.js 20+. The Dockerfile has been updated accordingly.
+
 ## Short Version
 
 If you only remember one path, remember this:

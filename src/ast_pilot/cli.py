@@ -9,19 +9,43 @@ import tempfile
 from pathlib import Path
 
 
+def _resolve_language(args: argparse.Namespace) -> str:
+    from .languages import infer_language, validate_language
+
+    explicit = getattr(args, "language", None)
+    if explicit:
+        return validate_language(explicit)
+    sources = getattr(args, "sources", None) or []
+    return infer_language(sources)
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
-    from .scanner import scan
+    language = _resolve_language(args)
 
-    source_paths = [Path(p) for p in args.sources]
-    test_paths = [Path(p) for p in args.tests] if args.tests else None
-    readme = Path(args.readme) if args.readme else None
+    if language == "typescript":
+        from .node_scanner import scan_typescript
 
-    ev = scan(
-        source_paths=source_paths,
-        test_paths=test_paths,
-        project_name=args.name,
-        readme_path=readme,
-    )
+        source_paths = [Path(p) for p in args.sources]
+        test_paths = [Path(p) for p in args.tests] if args.tests else None
+        readme = Path(args.readme) if args.readme else None
+        ev = scan_typescript(
+            source_paths=source_paths,
+            test_paths=test_paths,
+            project_name=args.name,
+            readme_path=readme,
+        )
+    else:
+        from .scanner import scan
+
+        source_paths = [Path(p) for p in args.sources]
+        test_paths = [Path(p) for p in args.tests] if args.tests else None
+        readme = Path(args.readme) if args.readme else None
+        ev = scan(
+            source_paths=source_paths,
+            test_paths=test_paths,
+            project_name=args.name,
+            readme_path=readme,
+        )
 
     out = args.output or "evidence.json"
     ev.save(out)
@@ -35,11 +59,15 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
 def cmd_spec(args: argparse.Namespace) -> None:
     from .evidence import Evidence
-    from .spec_renderer import render_start_md
 
     ev = Evidence.load(args.evidence)
     out = args.output or "start.md"
     use_llm = not args.no_llm
+
+    if ev.language == "typescript":
+        from .node_spec_renderer import render_start_md
+    else:
+        from .spec_renderer import render_start_md
 
     md = render_start_md(ev, output_path=out, use_llm=use_llm)
     print(f"Generated {len(md)} chars -> {out}")
@@ -49,7 +77,6 @@ def cmd_spec(args: argparse.Namespace) -> None:
 
 def cmd_bundle(args: argparse.Namespace) -> None:
     from .evidence import Evidence
-    from .grader_gen import generate_graders
 
     ev = Evidence.load(args.evidence)
     out_dir, cleanup_after_success = _prepare_bundle_root(args.output, ev.project_name)
@@ -61,6 +88,11 @@ def cmd_bundle(args: argparse.Namespace) -> None:
     no_alignment = getattr(args, "no_alignment_autofix", False)
     alignment_max = getattr(args, "alignment_max_rounds", 2)
     use_llm = not getattr(args, "no_llm", False)
+
+    if ev.language == "typescript":
+        from .node_grader_gen import generate_graders
+    else:
+        from .grader_gen import generate_graders
 
     promoted_to: Path | None = None
     try:
@@ -105,15 +137,22 @@ def cmd_bundle(args: argparse.Namespace) -> None:
 def cmd_run(args: argparse.Namespace) -> None:
     """Full pipeline: scan -> spec -> bundle in one shot."""
 
-    from .grader_gen import generate_graders
-    from .scanner import scan
-    from .spec_renderer import render_start_md
+    language = _resolve_language(args)
 
     source_paths = [Path(p) for p in args.sources]
     test_paths = [Path(p) for p in args.tests] if args.tests else None
     readme = Path(args.readme) if args.readme else None
     out_dir, cleanup_after_success = _prepare_bundle_root(args.output, args.name)
     use_llm = not args.no_llm
+
+    if language == "typescript":
+        from .node_grader_gen import generate_graders
+        from .node_scanner import scan_typescript as scan
+        from .node_spec_renderer import render_start_md
+    else:
+        from .grader_gen import generate_graders
+        from .scanner import scan
+        from .spec_renderer import render_start_md
 
     print(f"=== Scanning {len(source_paths)} source files ===")
     ev = scan(
@@ -135,7 +174,10 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"  {len(md)} chars written")
 
     print("\n=== Validating start.md against evidence ===")
-    from .validator import validate
+    if language == "typescript":
+        from .node_validator import validate
+    else:
+        from .validator import validate
 
     vr = validate(ev, out_dir / "start.md")
     print(f"  {vr.summary()}")
@@ -270,7 +312,10 @@ def _undismissed_errors(vr, dismissed_keys: set[str]) -> list:
 
 
 def _load_validated_prompt(ev, prompt_path: Path) -> str:
-    from .validator import validate
+    if ev.language == "typescript":
+        from .node_validator import validate
+    else:
+        from .validator import validate
 
     if not prompt_path.is_file():
         print(f"Prompt markdown not found: {prompt_path}")
@@ -320,11 +365,12 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     p_scan = sub.add_parser("scan", help="Scan source files into evidence.json")
-    p_scan.add_argument("sources", nargs="+", help="Python source files to scan")
+    p_scan.add_argument("sources", nargs="+", help="Source files to scan (.py or .ts)")
     p_scan.add_argument("--tests", nargs="*", help="Test files to map")
     p_scan.add_argument("--name", default="my-library", help="Project name")
     p_scan.add_argument("--readme", help="Path to README.md")
     p_scan.add_argument("--output", "-o", help="Output path (default: evidence.json)")
+    p_scan.add_argument("--language", help="Source language (python|typescript). Auto-inferred from file extensions when omitted.")
     p_scan.set_defaults(func=cmd_scan)
 
     p_spec = sub.add_parser("spec", help="Generate start.md from evidence.json")
@@ -343,7 +389,7 @@ def main() -> None:
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_run = sub.add_parser("run", help="Full pipeline: scan -> spec -> bundle")
-    p_run.add_argument("sources", nargs="+", help="Python source files to scan")
+    p_run.add_argument("sources", nargs="+", help="Source files to scan (.py or .ts)")
     p_run.add_argument("--tests", nargs="*", help="Test files to map")
     p_run.add_argument("--name", default="my-library", help="Project name")
     p_run.add_argument("--readme", help="Path to README.md")
@@ -351,6 +397,7 @@ def main() -> None:
     p_run.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
     p_run.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
     p_run.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
+    p_run.add_argument("--language", help="Source language (python|typescript). Auto-inferred from file extensions when omitted.")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()
