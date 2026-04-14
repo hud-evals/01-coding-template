@@ -21,6 +21,7 @@ from .repo_support import (
     resolve_from_module,
     resolve_module_candidates,
 )
+from .shared_utils import pkg_name as _pkg_name, slug as _slug, write_text as _write
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 SUPPORT_ROOT = "/opt/ast_pilot_support"
@@ -810,19 +811,6 @@ def _unsupported_reason(unsupported_modules: list[str]) -> str:
     if len(unsupported_modules) > 4:
         joined += ", ..."
     return f"depends on unsupported internal module(s): {joined}"
-
-
-def _slug(name: str) -> str:
-    return name.lower().replace(" ", "-").replace("_", "-")
-
-
-def _pkg_name(name: str) -> str:
-    return name.lower().replace("-", "_").replace(" ", "_")
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
 
 
 def _line_count(path: Path) -> int:

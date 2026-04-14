@@ -9,17 +9,14 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from pathlib import Path
 
 _client = None
+_client_api_key: str | None = None
 
 HUD_GATEWAY_BASE_URL = "https://inference.hud.ai/v1"
 DEFAULT_MODEL = "claude-haiku-4-5"
-
-
-@dataclass
-class LLMResponse:
-    text: str
 
 
 def call_text_llm(
@@ -50,12 +47,15 @@ def call_text_llm(
             temperature=temperature,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.choices[0].message.content
+        text = _extract_response_text(response)
     except Exception as exc:
         print(f"[warn] LLM call failed: {exc}")
         return None
 
-    if text and expect_json:
+    if text is None:
+        return None
+
+    if expect_json:
         try:
             json.loads(text)
         except (json.JSONDecodeError, TypeError):
@@ -66,15 +66,16 @@ def call_text_llm(
 
 def _get_client():
     """Return a cached OpenAI-compatible client pointing at the HUD gateway."""
-    global _client
-    if _client is not None:
-        return _client
+    global _client, _client_api_key
 
     _load_dotenv()
 
     hud_key = os.environ.get("HUD_API_KEY", "")
     if not hud_key:
         return None
+
+    if _client is not None and _client_api_key == hud_key:
+        return _client
 
     try:
         from openai import OpenAI
@@ -83,6 +84,7 @@ def _get_client():
             api_key=hud_key,
             base_url=HUD_GATEWAY_BASE_URL,
         )
+        _client_api_key = hud_key
         return _client
     except ImportError:
         print("[warn] openai package not installed; cannot use HUD gateway")
@@ -102,29 +104,93 @@ def _load_dotenv() -> None:
     if os.environ.get("HUD_API_KEY"):
         return
 
-    from pathlib import Path
-
     for parent in (Path.cwd(), *Path.cwd().parents):
         env_file = parent / ".env"
         if env_file.is_file():
             for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
+                parsed = _parse_dotenv_line(line)
+                if parsed is None:
                     continue
-                if line.startswith("export "):
-                    line = line[7:]
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and value and key not in os.environ:
+                key, value = parsed
+                if key not in os.environ:
                     os.environ[key] = value
             break
 
 
+def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[7:].lstrip()
+    if "=" not in stripped:
+        return None
+
+    key, _, raw_value = stripped.partition("=")
+    key = key.strip()
+    if not key:
+        return None
+    return key, _parse_dotenv_value(raw_value.strip())
+
+
+def _parse_dotenv_value(raw_value: str) -> str:
+    if not raw_value:
+        return ""
+
+    quote = raw_value[0]
+    if quote in {'"', "'"}:
+        value_chars: list[str] = []
+        escaped = False
+        for char in raw_value[1:]:
+            if escaped:
+                value_chars.append(char)
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                return "".join(value_chars)
+            value_chars.append(char)
+        return raw_value[1:]
+
+    return re.sub(r"\s+#.*$", "", raw_value).strip()
+
+
+def _extract_response_text(response) -> str | None:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return None
+
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [_extract_text_part(part) for part in content]
+        text = "".join(part for part in parts if part)
+        return text or None
+
+    text = getattr(content, "text", None)
+    if isinstance(text, str):
+        return text
+    return None
+
+
+def _extract_text_part(part) -> str | None:
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict):
+        text = part.get("text")
+        return text if isinstance(text, str) else None
+
+    text = getattr(part, "text", None)
+    return text if isinstance(text, str) else None
+
+
 def reset_client() -> None:
     """Reset the cached client (useful for testing)."""
-    global _client, _dotenv_loaded
+    global _client, _client_api_key, _dotenv_loaded
     _client = None
+    _client_api_key = None
     _dotenv_loaded = False

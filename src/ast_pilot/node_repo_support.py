@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,8 +54,18 @@ def find_node_repo_root(path: str | Path) -> Path | None:
     return None
 
 
-def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
-    """Detect and validate a Node/TypeScript project from source file paths."""
+def detect_node_project(
+    source_paths: list[str | Path],
+    *,
+    require_lockfile: bool = False,
+    auto_generate_lockfile: bool = False,
+) -> NodeRepoContext:
+    """Detect and validate a Node/TypeScript project from source file paths.
+
+    Detection is read-only by default. Callers that need a ``package-lock.json``
+    for bundling can opt in by setting ``require_lockfile=True`` and
+    ``auto_generate_lockfile=True``.
+    """
     if not source_paths:
         raise ValueError("No source paths provided for TypeScript scanning.")
 
@@ -70,9 +82,9 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
     except (json.JSONDecodeError, OSError) as exc:
         raise ValueError(f"Could not read {pkg_path}: {exc}") from exc
 
-    if not (root / "package-lock.json").exists():
-        _auto_generate_lockfile(root)
     has_lockfile = (root / "package-lock.json").exists()
+    if require_lockfile and not has_lockfile and auto_generate_lockfile:
+        has_lockfile = _auto_generate_lockfile(root)
 
     tsconfig = _find_first(root, TSCONFIG_NAMES)
     vitest_config = _find_first(root, VITEST_CONFIG_NAMES)
@@ -85,11 +97,14 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
     unsupported: list[str] = []
     if pkg.get("workspaces"):
         unsupported.append("Monorepo workspaces are not supported in v0 TypeScript mode.")
-    if not has_lockfile:
-        unsupported.append(
-            "package-lock.json is required and could not be auto-generated. "
-            "Ensure npm is installed and package.json is valid."
-        )
+    if require_lockfile and not has_lockfile:
+        if auto_generate_lockfile:
+            unsupported.append(
+                "package-lock.json is required and could not be auto-generated. "
+                "Ensure npm is installed and package.json is valid."
+            )
+        else:
+            unsupported.append("package-lock.json is required for TypeScript task bundling.")
     if test_runner not in ("vitest",):
         unsupported.append(
             f"Test runner '{test_runner}' is not yet supported. Only Vitest is supported in v0."
@@ -111,32 +126,35 @@ def detect_node_project(source_paths: list[str | Path]) -> NodeRepoContext:
     )
 
 
-def _auto_generate_lockfile(root: Path) -> None:
+def _auto_generate_lockfile(root: Path) -> bool:
     """Auto-generate package-lock.json when missing (e.g. pnpm/yarn repos)."""
     pkg_json = root / "package.json"
     if not pkg_json.exists():
-        return
+        return False
     print(f"  [node] No package-lock.json found, generating from package.json...", file=sys.stderr)
-    import tempfile
-    env = {**__import__("os").environ, "NPM_CONFIG_CACHE": tempfile.mkdtemp(prefix="ast_pilot_npm_")}
-    try:
-        result = subprocess.run(
-            ["npm", "install", "--package-lock-only", "--legacy-peer-deps", "--ignore-scripts"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-        if result.returncode == 0:
-            print(f"  [node] Generated package-lock.json", file=sys.stderr)
-        else:
+    with tempfile.TemporaryDirectory(prefix="ast_pilot_npm_") as cache_dir:
+        env = {**os.environ, "NPM_CONFIG_CACHE": cache_dir}
+        try:
+            result = subprocess.run(
+                ["npm", "install", "--package-lock-only", "--legacy-peer-deps", "--ignore-scripts"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+            if result.returncode == 0:
+                print(f"  [node] Generated package-lock.json", file=sys.stderr)
+                return (root / "package-lock.json").exists()
             msg = result.stderr.strip()[:200] if result.stderr else "unknown error"
             print(f"  [node] Failed to generate package-lock.json: {msg}", file=sys.stderr)
-    except FileNotFoundError:
-        print(f"  [node] npm not found on PATH, cannot generate package-lock.json", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        print(f"  [node] Timed out generating package-lock.json", file=sys.stderr)
+            return False
+        except FileNotFoundError:
+            print(f"  [node] npm not found on PATH, cannot generate package-lock.json", file=sys.stderr)
+            return False
+        except subprocess.TimeoutExpired:
+            print(f"  [node] Timed out generating package-lock.json", file=sys.stderr)
+            return False
 
 
 def _find_first(root: Path, names: tuple[str, ...]) -> Path | None:

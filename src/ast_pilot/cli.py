@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .shared_utils import pkg_name as _pkg_name, slug as _slug
+
 
 def _resolve_language(args: argparse.Namespace) -> str:
     from .languages import infer_language, validate_language
@@ -347,14 +349,6 @@ def _bundle_result_message(out_dir: Path, promoted_to: Path | None, kept_artifac
             return f"Done. Task package updated at {promoted_to} and bundle artifacts kept in {out_dir}/"
         return f"Done. Task package updated at {promoted_to}"
     return f"Done. Bundle artifacts kept in {out_dir}/"
-
-
-def _slug(name: str) -> str:
-    return name.lower().replace(" ", "-").replace("_", "-")
-
-
-def _pkg_name(name: str) -> str:
-    return name.lower().replace("-", "_").replace(" ", "_")
 
 
 def main() -> None:

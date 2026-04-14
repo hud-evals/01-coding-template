@@ -19,6 +19,7 @@ from .repo_support import (
     resolve_from_module,
     resolve_module_candidates,
 )
+from .shared_utils import build_required_symbols_text, primary_module_name
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 
@@ -110,7 +111,7 @@ def _build_project_facts(ev: Evidence) -> str:
 def _section_instructions(ev: Evidence, use_llm: bool) -> str:
     facts = _build_project_facts(ev)
     exact_api = _build_exact_api_listing(ev)
-    required_symbols = _build_required_symbols_text(ev)
+    required_symbols = build_required_symbols_text(_build_required_symbol_items(ev))
     target_files = ", ".join(f"`{name}`" for name in _workspace_target_files(ev))
 
     if use_llm:
@@ -236,13 +237,6 @@ def _section_required_symbols(ev: Evidence) -> str:
     for item in items:
         lines.append(f"- `{item}`")
     return "\n".join(lines)
-
-
-def _build_required_symbols_text(ev: Evidence) -> str:
-    items = _build_required_symbol_items(ev)
-    if not items:
-        return "- No explicit tested symbols were extracted."
-    return "\n".join(f"- {item}" for item in items)
 
 
 def _build_required_symbol_items(ev: Evidence) -> list[str]:
@@ -385,13 +379,6 @@ def _workspace_target_files(ev: Evidence) -> list[str]:
     return files
 
 
-def _primary_module_name(ev: Evidence) -> str:
-    target_files = _workspace_target_files(ev)
-    if target_files:
-        return Path(target_files[0]).stem
-    return ev.project_name.lower().replace("-", "_").replace(" ", "_")
-
-
 # ---------------------------------------------------------------------------
 # Section 4: Directory Structure
 # ---------------------------------------------------------------------------
@@ -419,7 +406,7 @@ def _section_api_usage(ev: Evidence) -> str:
     parts.append("### 1. Module Import")
     parts.append("")
     parts.append("```python")
-    pkg = _primary_module_name(ev)
+    pkg = primary_module_name(_workspace_target_files(ev), ev.project_name)
     imports: list[str] = []
     for mod in ev.source_files:
         for cls in mod.classes:

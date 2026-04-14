@@ -167,6 +167,32 @@ class NodeScannerTests(unittest.TestCase):
                 {"defaultInstance", "serialize"},
             )
 
+    def test_scan_typescript_does_not_create_lockfile_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_repo(root)
+            (root / "package-lock.json").unlink()
+
+            source_path = root / "src" / "args.ts"
+            source_path.write_text(
+                "export function parseArgs(value: string): string { return value; }\n",
+                encoding="utf-8",
+            )
+            test_path = root / "tests" / "args.test.ts"
+            test_path.write_text(
+                'import { parseArgs } from "../src/args.ts";\n',
+                encoding="utf-8",
+            )
+
+            ev = scan_typescript(
+                source_paths=[source_path],
+                test_paths=[test_path],
+                project_name="demo",
+            )
+
+            self.assertEqual(ev.project_name, "demo")
+            self.assertFalse((root / "package-lock.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
