@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .evidence import Evidence, FunctionInfo
 from .llm_client import call_text_llm
+from .shared_utils import build_required_symbols_text, primary_module_name
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 
@@ -86,7 +87,7 @@ def _build_project_facts(ev: Evidence) -> str:
 def _section_instructions(ev: Evidence, use_llm: bool) -> str:
     facts = _build_project_facts(ev)
     exact_api = _build_exact_api_listing(ev)
-    required_symbols = _build_required_symbols_text(ev)
+    required_symbols = build_required_symbols_text(_build_required_symbol_items(ev))
     target_files = ", ".join(f"`{name}`" for name in _workspace_target_files(ev))
 
     if use_llm:
@@ -233,13 +234,6 @@ def _build_required_symbol_items(ev: Evidence) -> list[str]:
     return items
 
 
-def _build_required_symbols_text(ev: Evidence) -> str:
-    items = _build_required_symbol_items(ev)
-    if not items:
-        return "- No explicit tested symbols were extracted."
-    return "\n".join(f"- {item}" for item in items)
-
-
 def _format_required_symbol(fn: FunctionInfo, owner: str | None = None) -> str:
     prefix = "async " if fn.is_async else ""
     name = f"{owner}.{fn.name}" if owner else fn.name
@@ -317,7 +311,7 @@ def _section_api_usage(ev: Evidence) -> str:
     parts.append("### 1. Module Import")
     parts.append("")
     parts.append("```typescript")
-    pkg = _primary_module_name(ev)
+    pkg = primary_module_name(_workspace_target_files(ev), ev.project_name)
     imports: list[str] = []
     for mod in ev.source_files:
         for cls in mod.classes:
@@ -601,13 +595,6 @@ def _workspace_target_files(ev: Evidence) -> list[str]:
         seen.add(name)
         files.append(name)
     return files
-
-
-def _primary_module_name(ev: Evidence) -> str:
-    target_files = _workspace_target_files(ev)
-    if target_files:
-        return Path(target_files[0]).stem
-    return ev.project_name.lower().replace("-", "_").replace(" ", "_")
 
 
 def _call_llm(prompt: str, max_tokens: int = 16384) -> str | None:

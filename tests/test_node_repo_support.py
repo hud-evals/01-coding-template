@@ -85,8 +85,24 @@ class DetectNodeProjectTests(unittest.TestCase):
             (root / "package-lock.json").unlink()
             self.assertFalse((root / "package-lock.json").exists())
 
-            ctx = detect_node_project([src])
+            ctx = detect_node_project(
+                [src],
+                require_lockfile=True,
+                auto_generate_lockfile=True,
+            )
             self.assertTrue((root / "package-lock.json").exists())
+            self.assertTrue(ctx.is_supported)
+
+    def test_readonly_detection_does_not_generate_lockfile_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src = self._make_supported_repo(root)
+            (root / "package-lock.json").unlink()
+            self.assertFalse((root / "package-lock.json").exists())
+
+            ctx = detect_node_project([src])
+
+            self.assertFalse((root / "package-lock.json").exists())
             self.assertTrue(ctx.is_supported)
 
     def test_rejects_jest_only(self) -> None:

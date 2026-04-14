@@ -30,42 +30,65 @@ def _log(msg: str, *, end: str = "\n") -> None:
     print(msg, end=end, flush=True)
 
 REVIEW_SYSTEM_PROMPT = """\
-You are a benchmark contract auditor.
+You are a strict benchmark contract auditor.
 
 Your job is to compare a task prompt against its hidden grader tests and \
-decide whether they describe the same contract.
+decide whether an agent reading ONLY the prompt can determine the exact \
+behavior the tests require.
 
-You must only report issues that are supported by direct quotations from \
-both the prompt and the grader.
+For every assertion or expected value in the test, ask yourself: \
+"Could an agent produce this exact output from the prompt alone, with \
+no guessing?" If the answer is no, that is an issue.
+
+Be aggressive about finding issues. Common problems include:
+- The test expects specific keys/properties in output that the prompt \
+  doesn't specify (e.g. both alias AND primary key in a result object)
+- The test expects errors to be thrown but the prompt doesn't say when \
+  or what errors to throw
+- The test expects exact string formatting (column alignment, spacing, \
+  newlines) that the prompt doesn't define precisely
+- The test expects a specific execution order (e.g. plugin hooks before/after \
+  command logic) that the prompt doesn't describe
+- The test expects edge case handling (e.g. hyphen-prefixed values, empty \
+  inputs, negation flags) that the prompt doesn't mention
+- The prompt uses vague language ("resolve both", "handle gracefully") where \
+  the test checks a specific concrete behavior
 
 Classify each issue as one of:
-- underspecified
-- hidden_requirement
-- direct_contradiction
-- prompt_only_ungraded
-- unclear
+- underspecified: prompt is vague where test expects specific behavior
+- hidden_requirement: test checks something the prompt never mentions
+- direct_contradiction: prompt says X, test expects Y
+- prompt_only_ungraded: prompt describes behavior no test checks
+- unclear: ambiguous wording that could be read either way
 
-Mark safe_to_fix=true only when the prompt can be tightened without \
-changing the intended behavior or contradicting the prompt's existing \
-explicit claims.
+Mark safe_to_fix=true when the prompt can be tightened to match the test \
+without contradicting any existing explicit claims.
 
-Mark safe_to_fix=false for contradictions, incompatible grader \
-expectations, or anything too ambiguous to repair safely.
+Mark safe_to_fix=false for contradictions or cases where fixing would \
+require guessing intent.
 
 Output strict JSON only.  If there are no issues, output:
 {"issues": []}
 """
 
 CONFIRM_SYSTEM_PROMPT = """\
-You are a benchmark contract auditor doing a confirmation pass.
+You are a strict benchmark contract auditor doing a confirmation pass.
 
-You receive a list of candidate issues found by a first-pass reviewer.  \
-For each issue, verify that it is real by checking the quoted evidence \
-against the prompt and grader snippets provided.
+You receive a list of candidate issues found by a first-pass reviewer. \
+For each issue, verify it by checking: could an agent reading ONLY the \
+prompt produce the exact output the test expects?
 
-Remove duplicates.  Downgrade or remove issues that turn out to be \
-false positives on closer reading.  Confirm the safe_to_fix \
-classification.
+Rules for this pass:
+- Remove exact duplicates (same issue reported from multiple test files)
+- Keep issues where the prompt is vague but the test expects specific behavior
+- Keep issues where the test checks edge cases the prompt never mentions
+- Keep issues where exact output format (keys, order, spacing) matters \
+  but the prompt doesn't specify it
+- Only remove issues that are genuine false positives — where the prompt \
+  actually DOES clearly specify the exact behavior the test checks
+- Do NOT remove an issue just because the prompt "sort of" or "implicitly" \
+  covers it. If an agent would have to guess, it's a real issue.
+- Confirm the safe_to_fix classification
 
 Output strict JSON only with the same schema:
 {"issues": [...]}
@@ -308,8 +331,12 @@ Include confirmed gaps as issues in your output.
 {task_summary or "(none)"}
 {gap_section}
 
-Report alignment issues between the prompt and THIS test file.
-If there are no issues, output {{"issues": []}}.
+For EACH assertion in the test file, check whether the prompt gives enough \
+information to produce the exact expected value. Report every case where an \
+agent would need to guess. Be thorough — check output shapes, error conditions, \
+execution order, exact string formatting, and edge cases.
+
+If there are genuinely no issues, output {{"issues": []}}.
 Output strict JSON matching this schema:
 {{
   "issues": [

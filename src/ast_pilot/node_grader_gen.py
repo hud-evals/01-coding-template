@@ -14,6 +14,7 @@ from pathlib import Path
 from .evidence import Evidence
 from .node_bundle import NodeBundleManifest, audit_bare_imports, build_manifest
 from .node_repo_support import detect_node_project
+from .shared_utils import slug as _slug, write_text as _write
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
 
@@ -51,7 +52,11 @@ def generate_graders(
     resolved_sources = [Path(p) for p in (source_paths or [mod.path for mod in ev.source_files])]
     resolved_tests = [Path(p) for p in (test_paths or [])]
 
-    ctx = detect_node_project(resolved_sources)
+    ctx = detect_node_project(
+        resolved_sources,
+        require_lockfile=True,
+        auto_generate_lockfile=True,
+    )
     repo_root = ctx.root
 
     config_paths: list[Path] = []
@@ -298,19 +303,9 @@ def _load_prompt(output_root: Path, project_name: str, prompt_md: str | None = N
 
     candidates = [
         output_root / "prompt.md",
-        output_root / "prompt.md",
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8")
 
     return f"# {project_name}\n\nImplement the TypeScript library described below.\n"
-
-
-def _slug(name: str) -> str:
-    return name.lower().replace(" ", "-").replace("_", "-")
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
