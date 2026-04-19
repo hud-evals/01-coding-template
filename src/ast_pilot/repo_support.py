@@ -159,6 +159,8 @@ def _discover_import_roots_cached(root_str: str) -> tuple[Path, ...]:
             return
         if candidate == root:
             return
+        if (candidate / "__init__.py").exists():
+            return
         if candidate not in roots:
             roots.append(candidate)
 

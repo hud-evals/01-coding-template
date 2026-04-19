@@ -255,6 +255,47 @@ class BuildManifestTests(unittest.TestCase):
             self.assertIn("tests/helpers/setup.ts", m.support_files)
             self.assertIn("tests/helpers/deep.ts", m.support_files)
 
+    def test_closure_walks_source_imports_not_just_test_imports(self) -> None:
+        """Source files can import local helpers that the tests never touch
+        directly. Those helpers must still land in support/ or the
+        agent's workspace copy will fail to load at test time."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src").mkdir()
+
+            helper = root / "src" / "helper.ts"
+            helper.write_text("export const sum = (a, b) => a + b;\n", encoding="utf-8")
+
+            src = root / "src" / "main.ts"
+            src.write_text(
+                'import { sum } from "./helper";\n'
+                "export const compute = (a, b) => sum(a, b);\n",
+                encoding="utf-8",
+            )
+
+            test = root / "tests" / "main.test.ts"
+            test.parent.mkdir(parents=True)
+            test.write_text(
+                'import { compute } from "../src/main";\n'
+                'import { describe, it, expect } from "vitest";\n'
+                'describe("compute", () => it("works", () => expect(compute(1, 2)).toBe(3)));\n',
+                encoding="utf-8",
+            )
+
+            pkg = root / "package.json"
+            pkg.write_text('{"name": "demo"}', encoding="utf-8")
+
+            m = build_manifest(
+                slug="demo",
+                repo_root=root,
+                source_paths=[src],
+                test_paths=[test],
+                config_paths=[pkg],
+            )
+
+            self.assertIn("src/helper.ts", m.support_files)
+
     def test_duplicate_basenames_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

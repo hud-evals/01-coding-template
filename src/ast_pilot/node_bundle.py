@@ -86,7 +86,7 @@ def build_manifest(
     all_known = set(source_files) | set(test_files) | set(config_files)
 
     support_files: dict[str, str] = {}
-    frontier = list(test_files.keys())
+    frontier = list(test_files.keys()) + list(source_files.keys())
     visited: set[str] = set(frontier)
 
     while frontier:

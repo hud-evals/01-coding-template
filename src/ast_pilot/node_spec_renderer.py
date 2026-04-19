@@ -104,6 +104,14 @@ CRITICAL RULES:
 - This is a TypeScript project. All code should be written in TypeScript.
 - Write requirements as a numbered list under a "### Behavioral Requirements" heading.
 
+NO SUMMARIZATION — THIS IS MANDATORY:
+- NEVER write "and others", "etc.", "similar", "such as", "including but not limited to", "and so on", "and more", "(...)". These phrases are BANNED. The agent cannot read your mind.
+- If a constant is a list/tuple/array of N patterns, prefixes, regexes, or strings, you MUST enumerate all N of them VERBATIM in the spec. Do not skip any.
+- If the test evidence checks specific string values (assertion literals, expected outputs, regex matches), COPY THOSE LITERALS VERBATIM into the requirement. Do not paraphrase them.
+- If two similar functions differ in subtle ways (e.g. one uses `padStart`, the other `padEnd`; one returns `""`, the other `true`), call out BOTH sides of the asymmetry explicitly.
+- When the exact API shows a constant assigned an array, copy the FULL array contents into the instructions using a fenced code block.
+- Prefer being verbose and repetitive over being concise and lossy. The reader (an LLM agent) will follow every instruction, so every missing detail is a guaranteed test failure.
+
 Project facts:
 {facts}
 
@@ -408,10 +416,7 @@ def _section_api_usage(ev: Evidence) -> str:
         parts.append("")
         parts.append("```typescript")
         for name, value in all_constants:
-            if len(value) < 200:
-                parts.append(f"export const {name} = {value};")
-            else:
-                parts.append(f"export const {name} = ...; // {len(value)} chars")
+            parts.append(f"export const {name} = {value};")
         parts.append("```")
 
     return "\n".join(parts)
@@ -459,11 +464,13 @@ def _section_implementation_notes(ev: Evidence, use_llm: bool) -> str:
     test_facts = _build_test_facts(ev)
     exact_api = _build_exact_api_listing(ev)
 
+    # Dump constants verbatim — long list-valued constants (e.g. regex prefix
+    # tables) are exactly the ones the LLM tends to summarise as "and others",
+    # which silently strips detail from the generated spec.
     const_facts = []
     for mod in ev.source_files:
         for name, value in mod.constants:
-            if len(value) < 200:
-                const_facts.append(f"export const {name} = {value}")
+            const_facts.append(f"export const {name} = {value}")
 
     if use_llm and test_facts:
         prompt = f"""Based on these test cases and the exact API for a TypeScript library, write implementation notes.
@@ -475,13 +482,20 @@ CRITICAL RULES:
 - Use EXACT method signatures from the API listing below.
 - This is TypeScript, not Python. Use TypeScript conventions.
 
-Constants (use exact values):
+NO SUMMARIZATION — THIS IS MANDATORY:
+- NEVER write "and others", "etc.", "similar", "such as", "including but not limited to", "and so on", "and more", "(...)". These phrases are BANNED.
+- If a constant in the list below is an array/tuple of patterns, prefixes, regexes, or strings, enumerate ALL of them VERBATIM in the notes (use a fenced code block).
+- For every test in the test evidence, copy the exact assertion literals (expected strings, expected substrings, numeric values, object keys) into the corresponding note. A note that says "checks that the parsed result has the correct key" is WRONG; it must say "checks that the parsed result equals the literal object `{{ _: [], name: \\"John\\" }}`".
+- When two behaviors look similar but differ in a subtle way (e.g. boolean vs empty string, padStart vs padEnd, truncate vs preserve), describe BOTH sides of the asymmetry explicitly.
+- Prefer being verbose and repetitive over being concise and lossy.
+
+Constants (use exact values, copy full array bodies verbatim):
 {chr(10).join(const_facts)}
 
 Exact API signatures:
 {exact_api}
 
-Test evidence:
+Test evidence (copy assertion literals verbatim when writing notes):
 {test_facts}
 
 Write grouped implementation notes. Start with "## Implementation Notes". Use "### Note N: <topic>"."""
@@ -566,13 +580,15 @@ def _build_exact_api_listing(ev: Evidence) -> str:
             lines.append(f"export {prefix}function {fn.name}({params}){ret}")
 
         for name, value in mod.constants:
-            if len(value) < 120:
-                lines.append(f"export const {name} = {value}")
+            lines.append(f"export const {name} = {value}")
 
     return "\n".join(lines)
 
 
 def _build_test_facts(ev: Evidence) -> str:
+    """Dump test bodies verbatim (up to a large cap) so the LLM sees the exact
+    assertion literals and expected output — summarising them leads to subtle
+    misses (e.g. wrong prefix lists, dropped edge cases)."""
     if not ev.tests:
         return ""
     lines: list[str] = []
@@ -581,7 +597,7 @@ def _build_test_facts(ev: Evidence) -> str:
         lines.append(f"- {t.test_name} -> tests: {syms}")
         if t.source_snippet:
             import textwrap
-            lines.append(textwrap.indent(t.source_snippet[:500], "  "))
+            lines.append(textwrap.indent(t.source_snippet[:4000], "  "))
     return "\n".join(lines)
 
 

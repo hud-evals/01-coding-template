@@ -13,9 +13,11 @@ from .evidence import (
     FunctionInfo,
     ModuleInfo,
     Parameter,
+    RuntimeAsset,
     TestEvidence,
 )
 from .repo_support import find_repo_context
+from .runtime_assets import collect_runtime_assets
 
 try:
     import tomllib
@@ -49,7 +51,46 @@ def scan(
         ev.readme_sections = _extract_readme(Path(readme_path))
 
     ev.dependencies = _collect_third_party_deps(ev)
+    ev.runtime_assets = _collect_runtime_asset_evidence(source_paths, test_paths or [])
     return ev
+
+
+def _collect_runtime_asset_evidence(
+    source_paths: list[str | Path],
+    test_paths: list[str | Path],
+) -> list[RuntimeAsset]:
+    """Scan all source + test files for runtime file references."""
+
+    scan_targets: list[Path] = []
+    for raw in (*source_paths, *test_paths):
+        candidate = Path(raw)
+        if candidate.exists():
+            scan_targets.append(candidate)
+    if not scan_targets:
+        return []
+
+    repo = find_repo_context(scan_targets)
+    if repo is None:
+        return []
+
+    known = set(repo.module_index.keys())
+    resolved = collect_runtime_assets(
+        scan_targets,
+        repo.root,
+        import_roots=repo.import_roots,
+        known_python_modules=known,
+    )
+    assets: list[RuntimeAsset] = []
+    for rel_path, asset in sorted(resolved.items()):
+        assets.append(
+            RuntimeAsset(
+                rel_path=rel_path,
+                kind=asset.kind,
+                size_bytes=asset.size_bytes,
+                referenced_by=list(asset.referenced_by),
+            )
+        )
+    return assets
 
 
 def _detect_python_version(source_paths: list[str | Path]) -> str:
