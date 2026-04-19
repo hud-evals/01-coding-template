@@ -87,6 +87,22 @@ class TestEvidence:
 
 
 @dataclass
+class RuntimeAsset:
+    """A non-code file referenced by source or tests at runtime.
+
+    ``kind`` is ``"bundled"`` when the original repo shipped the file (we
+    include it under ``support/``) or ``"to_create_by_agent"`` when the
+    tests reference a file the repo does not provide (the prompt must
+    tell the agent to create it).
+    """
+
+    rel_path: str
+    kind: str = "bundled"
+    size_bytes: int = 0
+    referenced_by: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Evidence:
     """Root container for everything extracted from a scan."""
 
@@ -105,6 +121,7 @@ class Evidence:
     test_runner: str = ""
     module_system: str = ""
     config_files: list[str] = field(default_factory=list)
+    runtime_assets: list[RuntimeAsset] = field(default_factory=list)
 
     def all_public_symbols(self) -> list[str]:
         symbols: list[str] = []
@@ -201,6 +218,15 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
                 test_name=t["test_name"],
                 tested_symbols=t.get("tested_symbols", []),
                 source_snippet=t.get("source_snippet", ""),
+            )
+        )
+    for asset in d.get("runtime_assets", []):
+        ev.runtime_assets.append(
+            RuntimeAsset(
+                rel_path=asset["rel_path"],
+                kind=asset.get("kind", "bundled"),
+                size_bytes=asset.get("size_bytes", 0),
+                referenced_by=list(asset.get("referenced_by", [])),
             )
         )
     return ev

@@ -42,6 +42,7 @@ def render_start_md(
         _section_project_description(ev, use_llm),
         _section_instructions(ev, use_llm),
         _section_required_symbols(ev),
+        _section_runtime_files(ev),
         _section_environment(ev),
         _section_directory_structure(ev),
         _section_api_usage(ev),
@@ -126,6 +127,14 @@ CRITICAL RULES:
 - Do NOT invent parameters or simplify signatures. Copy them exactly.
 - Do NOT invent behaviors not described in the docstrings or test evidence below.
 - Write requirements as a numbered list under a "### Behavioral Requirements" heading. Each requirement should describe WHAT a function/class does and HOW it should behave.
+
+NO SUMMARIZATION — THIS IS MANDATORY:
+- NEVER write "and others", "etc.", "similar", "such as", "including but not limited to", "and so on", "and more", "(...)". These phrases are BANNED. The agent cannot read your mind.
+- If a constant is a list of N patterns, prefixes, regexes, or strings, you MUST enumerate all N of them VERBATIM in the spec. Do not skip any.
+- If the test evidence checks specific string values (assertion literals, expected outputs, regex matches), COPY THOSE LITERALS VERBATIM into the requirement. Do not paraphrase them.
+- If two similar functions differ in subtle ways (e.g. one uses `padStart`, the other `padEnd`; one returns `""`, the other `true`), call out BOTH sides of the asymmetry explicitly.
+- When the exact API shows a constant assigned a list, copy the FULL list contents into the instructions, line by line if needed, using a fenced code block.
+- Prefer being verbose and repetitive over being concise and lossy. The reader (an LLM agent) will follow every instruction, so every missing detail is a guaranteed test failure.
 
 Project facts:
 {facts}
@@ -224,6 +233,52 @@ def _section_environment(ev: Evidence) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _section_runtime_files(ev: Evidence) -> str:
+    """Describe non-Python files the hidden tests expect to exist at runtime."""
+
+    if not ev.runtime_assets:
+        return ""
+
+    bundled = [a for a in ev.runtime_assets if a.kind == "bundled"]
+    to_create = [a for a in ev.runtime_assets if a.kind == "to_create_by_agent"]
+    if not bundled and not to_create:
+        return ""
+
+    lines = ["## Runtime Files", ""]
+    lines.append(
+        "The hidden tests open the following non-Python files at runtime. "
+        "Paths are relative to the workspace root."
+    )
+    lines.append("")
+
+    if to_create:
+        lines.append("### Files you must create")
+        lines.append("")
+        lines.append(
+            "These paths are referenced by the hidden tests but are not shipped with "
+            "the task. Create each one at the listed path and make sure the contents "
+            "match what the described behavior implies."
+        )
+        lines.append("")
+        for asset in to_create:
+            lines.append(f"- `{WORKSPACE_DIR}/{asset.rel_path}`")
+        lines.append("")
+
+    if bundled:
+        lines.append("### Files already provided")
+        lines.append("")
+        lines.append(
+            "These files are staged into the workspace automatically before the "
+            "hidden tests run. You may read them, but do not need to re-create them."
+        )
+        lines.append("")
+        for asset in bundled:
+            lines.append(f"- `{WORKSPACE_DIR}/{asset.rel_path}`")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _section_required_symbols(ev: Evidence) -> str:
@@ -390,6 +445,9 @@ def _section_directory_structure(ev: Evidence) -> str:
     lines.append("├── pyproject.toml")
     for name in _workspace_target_files(ev):
         lines.append(f"├── {name}")
+    for asset in ev.runtime_assets:
+        marker = " (provided)" if asset.kind == "bundled" else " (you create)"
+        lines.append(f"├── {asset.rel_path}{marker}")
 
     lines.append("```")
     return "\n".join(lines)
@@ -587,13 +645,12 @@ def _build_exact_api_listing(ev: Evidence) -> str:
                 lines.append(f'    """{fn.docstring.split(chr(10))[0]}"""')
 
         for name, value in mod.constants:
-            if not name.startswith("_") and len(value) < 120:
-                lines.append(f"{name} = {value}")
+            lines.append(f"{name} = {value}")
 
         if mod.string_literals:
             lines.append("")
             lines.append(f"# String literals used as dict keys / data fields in {mod.module_name}:")
-            lines.append(f"# {', '.join(repr(s) for s in mod.string_literals[:50])}")
+            lines.append(f"# {', '.join(repr(s) for s in mod.string_literals)}")
 
     return "\n".join(lines)
 
@@ -619,12 +676,13 @@ def _section_implementation_notes(ev: Evidence, use_llm: bool) -> str:
     test_facts = _build_test_facts(ev)
     exact_api = _build_exact_api_listing(ev)
 
-    # Collect constant values for grounding
+    # Collect constant values for grounding — dump verbatim, even long ones.
+    # Long regex/prefix lists (e.g. _PREFIX_PATTERNS) are exactly the ones the
+    # LLM tends to summarise as "and others", which breaks the generated spec.
     const_facts = []
     for mod in ev.source_files:
         for name, value in mod.constants:
-            if len(value) < 200:
-                const_facts.append(f"{name} = {value}")
+            const_facts.append(f"{name} = {value}")
 
     if use_llm and test_facts:
         prompt = f"""Based on these test cases and the exact API for a Python library, write implementation notes.
@@ -635,13 +693,20 @@ CRITICAL RULES:
 - Use EXACT constant names and values from the constants list below.
 - Use EXACT method signatures from the API listing below.
 
-Constants (use exact values):
+NO SUMMARIZATION — THIS IS MANDATORY:
+- NEVER write "and others", "etc.", "similar", "such as", "including but not limited to", "and so on", "and more", "(...)". These phrases are BANNED.
+- If a constant in the list below is a list/tuple of patterns, prefixes, regexes, or strings, enumerate ALL of them VERBATIM in the notes (use a fenced code block).
+- For every test in the test evidence, copy the exact assertion literals (expected strings, expected substrings, numeric values, dict keys) into the corresponding note. A note that says "checks that the output contains the masked key" is WRONG; it must say "checks that the output contains the literal substring `sk-pro...jkl2`".
+- When two behaviors look similar but differ in a subtle way (e.g. boolean vs empty string, padStart vs padEnd, truncate vs preserve), describe BOTH sides of the asymmetry explicitly.
+- Prefer being verbose and repetitive over being concise and lossy.
+
+Constants (use exact values, copy full list bodies verbatim):
 {chr(10).join(const_facts)}
 
 Exact API signatures:
 {exact_api}
 
-Test evidence:
+Test evidence (copy assertion literals verbatim when writing notes):
 {test_facts}
 
 Write grouped implementation notes. Start with "## Implementation Notes". Use "### Node N: <topic>"."""
@@ -671,7 +736,12 @@ Write grouped implementation notes. Start with "## Implementation Notes". Use "#
 
 
 def _build_test_facts(ev: Evidence) -> str:
-    """Build a compact summary of test evidence for LLM prompts."""
+    """Build a summary of test evidence for LLM prompts.
+
+    Test bodies are dumped verbatim up to a large cap because the LLM needs the
+    exact assertion strings, literal values, and expected output — summarising
+    them leads to subtle misses (e.g. wrong prefix lists or dropped edge cases).
+    """
     if not ev.tests:
         return ""
     lines: list[str] = []
@@ -679,7 +749,7 @@ def _build_test_facts(ev: Evidence) -> str:
         syms = ", ".join(t.tested_symbols[:10])
         lines.append(f"- {t.test_name} -> tests: {syms}")
         if t.source_snippet:
-            lines.append(textwrap.indent(t.source_snippet[:500], "  "))
+            lines.append(textwrap.indent(t.source_snippet[:4000], "  "))
     return "\n".join(lines)
 
 

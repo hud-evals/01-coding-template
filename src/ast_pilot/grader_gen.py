@@ -27,6 +27,11 @@ WORKSPACE_DIR = "/home/ubuntu/workspace"
 SUPPORT_ROOT = "/opt/ast_pilot_support"
 SMALL_TEST_SUPPORT_MAX_LINES = 400
 ALLOW_UNSUPPORTED_TEST_REFS_ENV = "AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"
+REPO_ROOT_ENV = "AST_PILOT_REPO_ROOT"
+_PATH_ANCHOR_NAMES = frozenset({
+    "REPO_ROOT", "HERE", "BASE_DIR", "ROOT_DIR", "PROJECT_ROOT",
+    "REPO_DIR", "WORKSPACE", "WORKSPACE_DIR", "SRC_ROOT", "SOURCE_ROOT", "ROOT",
+})
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,13 @@ class SourceContext:
     target_module_map: dict[str, str]
     support_modules: frozenset[str]
     support_requirements: tuple[str, ...]
+    bundled_assets: tuple[tuple[str, Path], ...] = ()
+    """Pairs of ``(repo-relative path, absolute source path)`` for every
+    non-code file we ship under ``support/``.  Populated from
+    :attr:`ast_pilot.evidence.Evidence.runtime_assets` during bundling."""
+
+    agent_created_assets: tuple[str, ...] = ()
+    """Repo-relative paths for assets the agent must create themselves."""
 
 
 def generate_graders(
@@ -84,6 +96,7 @@ def generate_graders(
         test_files=test_files,
         golden_files=sorted(path.name for path in paths.golden_dir.glob("*.py")),
         support_enabled=bool(source_ctx.support_modules),
+        bundled_asset_paths=tuple(rel for rel, _ in source_ctx.bundled_assets),
     )
     _write(paths.task_dir / "task.py", task_py)
     files[f"tasks/{paths.slug}/task.py"] = task_py
@@ -127,6 +140,8 @@ def _build_source_context(
         )
     support_requirements = tuple(load_project_dependencies(repo)) if repo is not None and support_modules else ()
 
+    bundled_assets, agent_created_assets = _resolve_runtime_assets(ev, repo)
+
     return SourceContext(
         repo=repo,
         source_paths=resolved_sources,
@@ -134,7 +149,32 @@ def _build_source_context(
         target_module_map=target_module_map,
         support_modules=support_modules,
         support_requirements=support_requirements,
+        bundled_assets=bundled_assets,
+        agent_created_assets=agent_created_assets,
     )
+
+
+def _resolve_runtime_assets(
+    ev: Evidence,
+    repo: RepoContext | None,
+) -> tuple[tuple[tuple[str, Path], ...], tuple[str, ...]]:
+    """Split ``ev.runtime_assets`` into on-disk files we can bundle and
+    agent-created files we must only describe in the prompt."""
+
+    if not ev.runtime_assets:
+        return (), ()
+
+    bundled: list[tuple[str, Path]] = []
+    to_create: list[str] = []
+    for asset in ev.runtime_assets:
+        if asset.kind == "bundled" and repo is not None:
+            abs_path = (repo.root / asset.rel_path).resolve()
+            if abs_path.is_file():
+                bundled.append((asset.rel_path, abs_path))
+                continue
+        to_create.append(asset.rel_path)
+
+    return tuple(sorted(bundled)), tuple(sorted(to_create))
 
 
 def _resolve_existing_paths(paths: list[str | Path], label: str) -> tuple[Path, ...]:
@@ -245,44 +285,113 @@ def _write_golden_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[str
     files: dict[str, str] = {}
     for source_path in source_ctx.source_paths:
         content = source_path.read_text(encoding="utf-8", errors="replace")
+        content = _rewrite_source_relative_imports(content, source_ctx.repo, source_path)
         _write(paths.golden_dir / source_path.name, content)
         files[f"tasks/{paths.slug}/golden/{source_path.name}"] = content
     return files
 
 
+def _rewrite_source_relative_imports(
+    content: str,
+    repo: RepoContext | None,
+    source_path: Path,
+) -> str:
+    """Rewrite ``from .X import Y`` to the absolute equivalent.
+
+    After the golden source is flattened into the workspace, relative
+    imports can't resolve (the file no longer lives inside its original
+    package). Rewriting them to absolute form lets the workspace file
+    find its package-internal dependencies via the support/ tree, which
+    preserves the original package layout.
+    """
+
+    if repo is None:
+        return content
+
+    current_module = module_name_from_path(
+        source_path, repo.root, import_roots=repo.import_roots
+    )
+    if not current_module or "." not in current_module:
+        return content
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    rewrites: list[tuple[int, int, str]] = []
+    lines = content.splitlines(keepends=True)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level == 0:
+            continue
+        target = resolve_from_module(current_module, node.module, node.level)
+        if not target:
+            continue
+
+        end_line = node.end_lineno or node.lineno
+        first_line = lines[node.lineno - 1]
+        indent = first_line[: len(first_line) - len(first_line.lstrip())]
+
+        rendered_names: list[str] = []
+        for alias in node.names:
+            if alias.asname:
+                rendered_names.append(f"{alias.name} as {alias.asname}")
+            else:
+                rendered_names.append(alias.name)
+        replacement = f"{indent}from {target} import {', '.join(rendered_names)}\n"
+        rewrites.append((node.lineno, end_line, replacement))
+
+    if not rewrites:
+        return content
+
+    for start_line, end_line, replacement in sorted(rewrites, reverse=True):
+        lines[start_line - 1 : end_line] = [replacement]
+    return "".join(lines)
+
+
 def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[str, str]:
     files: dict[str, str] = {}
     repo = source_ctx.repo
-    if repo is None or not source_ctx.support_modules:
-        return files
+    has_modules = repo is not None and bool(source_ctx.support_modules)
 
-    modules_to_copy = set(source_ctx.support_modules)
-    for module_name in source_ctx.support_modules:
-        modules_to_copy.update(ancestor_package_paths(module_name, repo.module_index))
+    if has_modules:
+        modules_to_copy = set(source_ctx.support_modules)
+        for module_name in source_ctx.support_modules:
+            modules_to_copy.update(ancestor_package_paths(module_name, repo.module_index))
 
-    for target_module in source_ctx.target_module_map:
-        modules_to_copy.update(ancestor_package_paths(target_module, repo.module_index))
-        modules_to_copy.add(target_module)
+        for target_module in source_ctx.target_module_map:
+            modules_to_copy.update(ancestor_package_paths(target_module, repo.module_index))
+            modules_to_copy.add(target_module)
 
-    for module_name in sorted(modules_to_copy):
-        original_path = repo.module_index.get(module_name)
-        if original_path is None:
+        for module_name in sorted(modules_to_copy):
+            original_path = repo.module_index.get(module_name)
+            if original_path is None:
+                continue
+
+            if module_name in source_ctx.target_module_map:
+                content = _build_target_shim(module_name, source_ctx.target_module_map[module_name])
+            else:
+                content = original_path.read_text(encoding="utf-8", errors="replace")
+
+            relative_path = module_path_from_name(module_name, original_path)
+            destination = paths.support_dir / relative_path
+            _write(destination, content)
+            files[f"tasks/{paths.slug}/support/{relative_path.as_posix()}"] = content
+
+        if source_ctx.support_requirements:
+            requirements = "\n".join(source_ctx.support_requirements) + "\n"
+            _write(paths.task_dir / "requirements.hidden.txt", requirements)
+            files[f"tasks/{paths.slug}/requirements.hidden.txt"] = requirements
+
+    for rel_path, absolute_path in source_ctx.bundled_assets:
+        try:
+            content = absolute_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             continue
-
-        if module_name in source_ctx.target_module_map:
-            content = _build_target_shim(module_name, source_ctx.target_module_map[module_name])
-        else:
-            content = original_path.read_text(encoding="utf-8", errors="replace")
-
-        relative_path = module_path_from_name(module_name, original_path)
-        destination = paths.support_dir / relative_path
+        destination = paths.support_dir / rel_path
         _write(destination, content)
-        files[f"tasks/{paths.slug}/support/{relative_path.as_posix()}"] = content
-
-    if source_ctx.support_requirements:
-        requirements = "\n".join(source_ctx.support_requirements) + "\n"
-        _write(paths.task_dir / "requirements.hidden.txt", requirements)
-        files[f"tasks/{paths.slug}/requirements.hidden.txt"] = requirements
+        files[f"tasks/{paths.slug}/support/{rel_path}"] = content
 
     return files
 
@@ -307,6 +416,7 @@ def _write_test_files(
         for test_path in source_ctx.test_paths:
             original = test_path.read_text(encoding="utf-8", errors="replace")
             rewritten = _rewrite_test_imports(original, source_ctx.target_module_map)
+            rewritten = _rewrite_repo_root_assignments(rewritten)
             rewritten = _guard_unsupported_test_refs(
                 original_content=original,
                 rewritten_content=rewritten,
@@ -334,6 +444,7 @@ def _generate_task_py(
     test_files: list[str],
     golden_files: list[str],
     support_enabled: bool,
+    bundled_asset_paths: tuple[str, ...] = (),
 ) -> str:
     weight_per_check = round(1.0 / max(len(test_files), 1), 4)
 
@@ -366,6 +477,13 @@ def _generate_task_py(
         pythonpath_expr = repr(f"{WORKSPACE_DIR}:$PYTHONPATH")
         prepare_expr = '""'
 
+    assets_source_expr = "runtime_support_dir" if support_enabled else "_support_source_dir()"
+    stage_assets_expr = (
+        f"_stage_runtime_assets({assets_source_expr})"
+        if bundled_asset_paths
+        else '""'
+    )
+
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
@@ -391,6 +509,7 @@ def _generate_task_py(
         "    env.connect_hub(ENV_NAME)",
         "",
         f'    WORKSPACE_DIR = "{WORKSPACE_DIR}"',
+        f'    REPO_ROOT_ENV = "{REPO_ROOT_ENV}"',
         "",
         '    TESTS_DIR = TASK_DIR / "tests"',
         '    GOLDEN_DIR = TASK_DIR / "golden"',
@@ -400,6 +519,7 @@ def _generate_task_py(
         '    RUNTIME_ROOT = Path("/tmp/ast_pilot_task_runtime") / TASK_DIR.name',
         '    LOCAL_HIDDEN_REQUIREMENTS = TASK_DIR / "requirements.hidden.txt"',
         '    BUNDLED_HIDDEN_REQUIREMENTS = IMAGE_TASK_DIR / "requirements.hidden.txt"',
+        f"    BUNDLED_ASSETS = {list(bundled_asset_paths)!r}",
         "",
         "    def _support_source_dir() -> Path | None:",
         "        if LEGACY_SUPPORT_DIR.is_dir():",
@@ -453,18 +573,33 @@ def _generate_task_py(
         '            "PY\\n"',
         "        )",
         "",
+        "    def _stage_runtime_assets(source_dir: Path | None) -> str:",
+        '        """Copy bundled non-code assets into the workspace (no-clobber)."""',
+        "        if not BUNDLED_ASSETS or source_dir is None:",
+        '            return ""',
+        "        parts: list[str] = []",
+        "        for rel in BUNDLED_ASSETS:",
+        '            src = f"{source_dir}/{rel}"',
+        '            dst = f"{WORKSPACE_DIR}/{rel}"',
+        '            dst_dir = os.path.dirname(dst) or "/"',
+        "            parts.append(f\"mkdir -p '{dst_dir}'\")",
+        "            parts.append(f\"cp -n '{src}' '{dst}' 2>/dev/null || true\")",
+        '        return "; ".join(parts) + "; "',
+        "",
         f'    def _inject_and_run(test_file: str, workdir: str = "{WORKSPACE_DIR}") -> str:',
         '        """Build a bash command that writes a test file and runs pytest."""',
         "        content = (TESTS_DIR / test_file).read_text()",
         '        runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"',
         f"        prepare = {prepare_expr}",
+        f"        stage_assets = {stage_assets_expr}",
         f"        pythonpath = {pythonpath_expr}",
         "        return (",
         '            f"{prepare}"',
+        '            f"{stage_assets}"',
         '            f"cat > /tmp/{test_file} << \'TESTEOF\'\\n"',
         '            f"{content}\\n"',
         '            f"TESTEOF\\n"',
-        '            f"cd {workdir} && PYTHONPATH={pythonpath} python -m pytest /tmp/{test_file} -v"',
+        f'            f"cd {{workdir}} && {REPO_ROOT_ENV}={{workdir}} PYTHONPATH={{pythonpath}} python -m pytest /tmp/{{test_file}} -v"',
         "        )",
         "",
         '    def _golden_setup(source_file: str, dest: str) -> str:',
@@ -553,6 +688,95 @@ def _rewrite_test_imports(content: str, target_module_map: dict[str, str]) -> st
         for quote in ('"', "'"):
             rewritten = rewritten.replace(f"{quote}{original_module}.", f"{quote}{candidate_module}.")
     return rewritten
+
+
+def _rewrite_repo_root_assignments(content: str) -> str:
+    """Rewrite module-level ``REPO_ROOT``/``HERE``/... assignments that derive
+    from ``__file__`` to read ``AST_PILOT_REPO_ROOT`` instead.
+
+    The generated ``task.py`` sets that env var to the agent workspace root,
+    so tests that previously resolved paths relative to the test file
+    (which lives in ``/tmp/`` at grading time) now resolve relative to the
+    workspace where the agent wrote their files.
+    """
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    rewrites: list[tuple[int, int, str]] = []
+    for node in ast.iter_child_nodes(tree):
+        name, end_line = _extract_path_anchor_assignment(node)
+        if name is None:
+            continue
+
+        first_line = content.splitlines(keepends=True)[node.lineno - 1]
+        indent = first_line[: len(first_line) - len(first_line.lstrip())]
+        replacement = (
+            f'{indent}{name} = os.environ.get('
+            f'"{REPO_ROOT_ENV}", "{WORKSPACE_DIR}")'
+        )
+        rewrites.append((node.lineno, end_line, replacement))
+
+    if not rewrites:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    for start_line, end_line, replacement in sorted(rewrites, reverse=True):
+        original_end = lines[end_line - 1] if end_line - 1 < len(lines) else ""
+        trailing = "\n" if original_end.endswith("\n") else ""
+        lines[start_line - 1:end_line] = [replacement + trailing]
+    rewritten = "".join(lines)
+
+    if "import os" not in rewritten:
+        rewritten = _ensure_os_import(rewritten)
+    return rewritten
+
+
+def _extract_path_anchor_assignment(node: ast.AST) -> tuple[str | None, int]:
+    """If *node* is a path-anchor assignment derived from ``__file__``,
+    return ``(name, end_line)``; otherwise ``(None, 0)``."""
+
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in _PATH_ANCHOR_NAMES:
+            if _references_dunder_file(node.value):
+                return target.id, node.end_lineno or node.lineno
+    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        if node.target.id in _PATH_ANCHOR_NAMES and node.value is not None:
+            if _references_dunder_file(node.value):
+                return node.target.id, node.end_lineno or node.lineno
+    return None, 0
+
+
+def _references_dunder_file(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id == "__file__":
+            return True
+    return False
+
+
+def _ensure_os_import(content: str) -> str:
+    lines = content.splitlines(keepends=True)
+    insert_at = 0
+    for idx, line in enumerate(lines[:25]):
+        stripped = line.strip()
+        if stripped.startswith("from __future__"):
+            insert_at = idx + 1
+            continue
+        if idx == 0 and stripped.startswith(('"""', "'''")):
+            quote = stripped[:3]
+            if stripped.count(quote) >= 2 and len(stripped) > 3:
+                insert_at = idx + 1
+                continue
+            for scan_idx in range(idx + 1, len(lines)):
+                if lines[scan_idx].strip().endswith(quote):
+                    insert_at = scan_idx + 1
+                    break
+            break
+    lines.insert(insert_at, "import os\n")
+    return "".join(lines)
 
 
 def _guard_unsupported_test_refs(

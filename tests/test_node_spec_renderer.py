@@ -11,8 +11,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from ast_pilot.evidence import Evidence, ModuleInfo, TestEvidence
 from ast_pilot.node_scanner import scan_typescript
-from ast_pilot.node_spec_renderer import render_start_md
+from ast_pilot.node_spec_renderer import (
+    _build_exact_api_listing,
+    _build_test_facts,
+    render_start_md,
+)
 
 
 class NodeSpecRendererTests(unittest.TestCase):
@@ -132,6 +137,47 @@ class NodeSpecRendererTests(unittest.TestCase):
             self.assertIn("serializeValue", md)
             self.assertIn("Toolkit.serialize", md)
             self.assertIn("**Class Variables:**", md)
+
+    def test_exact_api_dumps_long_constant_values_verbatim(self) -> None:
+        """Long TS constants (e.g. prefix arrays) must reach LLM grounding.
+
+        Regression: earlier `len(value) < 120` cap silently dropped long list
+        literals, forcing the LLM to summarise them as "and others".
+        """
+        long_value = "[" + ", ".join(f'/prefix{i}_[a-z]+/' for i in range(20)) + "]"
+        self.assertGreater(len(long_value), 120)
+        mod = ModuleInfo(
+            path="parser.ts",
+            module_name="parser",
+            constants=[("PREFIX_PATTERNS", long_value)],
+        )
+        ev = Evidence(source_files=[mod], tests=[], python_version="")
+        out = _build_exact_api_listing(ev)
+        self.assertIn("PREFIX_PATTERNS", out)
+        self.assertIn("prefix0_", out)
+        self.assertIn("prefix19_", out)
+
+    def test_test_facts_preserve_long_snippets(self) -> None:
+        """TS snippet truncation must not strip assertion literals late in the test body.
+
+        Regression: earlier `[:500]` cut off expected object literals near the
+        end of longer vitest bodies.
+        """
+        body = "\n".join(
+            [f'  expect(parseRawArgs([{i}])).toEqual({{ token: "lit_{i}_xyz" }});' for i in range(40)]
+        )
+        snippet = f'it("long", () => {{\n{body}\n}});'
+        self.assertGreater(len(snippet), 500)
+        test_ev = TestEvidence(
+            test_file="parser.test.ts",
+            test_name="long",
+            tested_symbols=["parseRawArgs"],
+            source_snippet=snippet,
+        )
+        ev = Evidence(source_files=[], tests=[test_ev], python_version="")
+        facts = _build_test_facts(ev)
+        self.assertIn("lit_0_xyz", facts)
+        self.assertIn("lit_39_xyz", facts)
 
 
 if __name__ == "__main__":
