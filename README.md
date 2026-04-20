@@ -82,6 +82,14 @@ Generated `task.py` files hardcode the scenario ID `ast-pilot:coding-task`, load
 
 For TypeScript, the grader mirrors the repo tree in a temp directory at grading time, copies agent workspace files in by basename, stages hidden tests at their original paths, and runs `npx vitest run`. The agent never needs to run `npm install`.
 
+### Runtime assets and `REPO_ROOT`
+
+Non-Python files referenced by source or tests via `open(...)`, `sqlite3.connect(...)`, `Path(...) / "..."`, etc. (`.sql`, `.yaml`, `.json`, `.toml`, configs) are auto-detected. Files that exist in the source repo are bundled into `support/` and staged into the workspace before each check. References the scanner cannot resolve to a file on disk are surfaced in `prompt.md` under `Runtime Files → Files you must create` so the agent knows to produce them.
+
+Tests that derive paths from `__file__` — `REPO_ROOT = os.path.dirname(os.path.abspath(__file__))` and friends (`HERE`, `BASE_DIR`, `ROOT_DIR`, `PROJECT_ROOT`) — are rewritten at generation time to read `AST_PILOT_REPO_ROOT` (set to `/home/ubuntu/workspace` at grading time). Without this, tests staged at `/tmp/test_x.py` would resolve sibling files against `/tmp` instead of the agent's workspace.
+
+Detection only activates when the source tree has a repo-root marker (`pyproject.toml` or `package.json`); bare directories are skipped. Both behaviors require the tests to be present at scan time — if you copy hidden tests into `tasks/<name>/tests/` after regen, the rewrite and asset detection won't fire.
+
 ## Deploy and validate
 
 ```bash
