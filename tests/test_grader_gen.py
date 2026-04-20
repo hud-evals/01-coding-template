@@ -16,6 +16,7 @@ from ast_pilot.evidence import Evidence, ModuleInfo
 from ast_pilot.grader_gen import (
     REPO_ROOT_ENV,
     WORKSPACE_DIR,
+    _prepend_workspace_syspath,
     _rewrite_repo_root_assignments,
     generate_graders,
 )
@@ -1124,6 +1125,41 @@ class GraderGenTests(unittest.TestCase):
                 out_dir / "tasks" / "abs-imports" / "golden" / "models.py"
             ).read_text(encoding="utf-8")
             self.assertIn("from mypkg.helpers import upper", golden)
+
+    def test_prepend_syspath_imports_sys_before_using_it(self) -> None:
+        """`import sys` must appear before `sys.path.insert(...)` even when an
+        existing `import sys` lives later in the file.
+
+        Regression: earlier logic stripped `import sys` from the injected
+        header whenever it saw one anywhere in the first 10 lines, but the
+        injection point sits right after `from __future__ ...` — which can be
+        above the existing import. That made the test module NameError on
+        load (`sys` not yet bound).
+        """
+        original = (
+            '"""docstring"""\n\n'
+            "from __future__ import annotations\n\n"
+            "import sys\n"
+            "import os\n\n\n"
+            "def test_x():\n"
+            "    pass\n"
+        )
+        rewritten = _prepend_workspace_syspath(original)
+        lines = rewritten.splitlines()
+        sys_import_line = next(
+            i for i, line in enumerate(lines) if line.strip() == "import sys"
+        )
+        syspath_line = next(
+            i
+            for i, line in enumerate(lines)
+            if f'sys.path.insert(0, "{WORKSPACE_DIR}")' in line
+        )
+        self.assertLess(
+            sys_import_line,
+            syspath_line,
+            "import sys must be bound before sys.path.insert runs; "
+            f"got order:\n{rewritten}",
+        )
 
 
 if __name__ == "__main__":

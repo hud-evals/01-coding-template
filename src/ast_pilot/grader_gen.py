@@ -942,11 +942,13 @@ def _prepend_workspace_syspath(content: str) -> str:
         return content
 
     lines = content.splitlines()
-    header = ["import sys", f'sys.path.insert(0, "{WORKSPACE_DIR}")', ""]
-    if any(line.strip() == "import sys" for line in lines[:10]):
-        header = header[1:]
-
     insert_at = _find_header_insert_at(lines)
+
+    # Always emit `import sys` in the header even when an existing `import sys`
+    # appears later in the file. Stripping it and relying on the later import
+    # puts the `sys.path.insert(...)` call above its own binding — the test
+    # module fails to load with NameError. Re-importing `sys` is a no-op.
+    header = ["import sys", f'sys.path.insert(0, "{WORKSPACE_DIR}")', ""]
     return "\n".join(lines[:insert_at] + header + lines[insert_at:])
 
 
