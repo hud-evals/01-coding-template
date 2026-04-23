@@ -11,6 +11,7 @@ Two-stage review:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,11 +19,12 @@ from .grader_expectations import (
     compute_gaps,
     extract_grader_expectations,
     extract_prompt_surface,
+    format_asserted_literals_for_llm,
 )
 from .llm_client import call_text_llm
 
-MAX_REVIEW_TOKENS = 8192
-MAX_CONFIRM_TOKENS = 8192
+MAX_REVIEW_TOKENS = 32768
+MAX_CONFIRM_TOKENS = 16384
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -53,6 +55,13 @@ Be aggressive about finding issues. Common problems include:
   inputs, negation flags) that the prompt doesn't mention
 - The prompt uses vague language ("resolve both", "handle gracefully") where \
   the test checks a specific concrete behavior
+- The test asserts a specific literal string appears in the output \
+  (e.g. ``assert "123456789:***" in result``) but the prompt tells the \
+  agent to apply a substitution/format rule that would produce a DIFFERENT \
+  literal (e.g. calling a helper that returns first-6 + "..." + last-4). \
+  Every asserted literal must be reproducible verbatim from the prompt's \
+  instructions — if not, that is a direct_contradiction (safe_to_fix=true: \
+  rewrite the instruction to produce the asserted literal).
 
 Classify each issue as one of:
 - underspecified: prompt is vague where test expects specific behavior
@@ -67,8 +76,13 @@ without contradicting any existing explicit claims.
 Mark safe_to_fix=false for contradictions or cases where fixing would \
 require guessing intent.
 
-Output strict JSON only.  If there are no issues, output:
-{"issues": []}
+When an ASSERTED TEST LITERALS section is present, you MUST also populate a \
+``literal_checks`` array. Each entry is the structured result of simulating \
+one asserted literal against the prompt's substitution rules. Fill every \
+field on every entry — the downstream fixer consumes them directly.
+
+Output strict JSON only. If there are no model-flagged issues AND no literal \
+checks were requested, output ``{"issues": [], "literal_checks": []}``.
 """
 
 CONFIRM_SYSTEM_PROMPT = """\
@@ -159,6 +173,19 @@ def review_task_alignment(
     surface = extract_prompt_surface(prompt_md, language=language)
     gap_report = compute_gaps(expectations, surface, language=language)
     gap_context = gap_report.format_for_llm()
+    assertion_context = format_asserted_literals_for_llm(expectations)
+    assertion_literal_count = (
+        len(expectations.assertion_in_literals)
+        + len(expectations.assertion_not_in_literals)
+        + len(expectations.assertion_eq_literals)
+    )
+    if assertion_literal_count:
+        _log(
+            f"  Asserted literals for cross-check: {assertion_literal_count} "
+            f"({len(expectations.assertion_in_literals)} in, "
+            f"{len(expectations.assertion_not_in_literals)} not-in, "
+            f"{len(expectations.assertion_eq_literals)} eq)"
+        )
     if gap_report.total_gaps == 0:
         _log("  Deterministic gap analysis: clean (0 gaps)")
     else:
@@ -177,8 +204,22 @@ def review_task_alignment(
         _log("    Most are test-internal (mock vars, test data, JS builtins) — LLM review filters real issues")
 
     raw_issues: list[dict] = []
+    raw_literal_checks: list[dict] = []
     t0 = _time.monotonic()
     n = len(test_files)
+
+    def _consume(per_file: dict) -> str:
+        issues = per_file.get("issues", []) or []
+        checks = per_file.get("literal_checks", []) or []
+        raw_issues.extend(issues)
+        raw_literal_checks.extend(checks)
+        failed = sum(1 for c in checks if isinstance(c, dict) and c.get("matches_literal") is False)
+        tags = []
+        if issues:
+            tags.append(f"{len(issues)} issues")
+        if failed:
+            tags.append(f"{failed} failed literal checks")
+        return f" ({', '.join(tags)})" if tags else ""
 
     if n == 1:
         test_name, test_content = test_files[0]
@@ -187,10 +228,9 @@ def review_task_alignment(
             prompt_md, test_name, test_content, task_py_summary,
             max_tokens=max_review_tokens,
             gap_context=gap_context,
+            assertion_context=assertion_context,
         )
-        issues_tag = f" ({len(per_file)} issues)" if per_file else ""
-        _log(f" done{issues_tag} [{_time.monotonic() - t0:.1f}s]")
-        raw_issues.extend(per_file)
+        _log(f" done{_consume(per_file)} [{_time.monotonic() - t0:.1f}s]")
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -203,6 +243,7 @@ def review_task_alignment(
                     prompt_md, test_name, test_content, task_py_summary,
                     max_tokens=max_review_tokens,
                     gap_context=gap_context,
+                    assertion_context=assertion_context,
                 )
                 futures[fut] = test_name
 
@@ -211,28 +252,35 @@ def review_task_alignment(
                 done_count += 1
                 test_name = futures[fut]
                 per_file = fut.result()
-                issues_tag = f" ({len(per_file)} issues)" if per_file else ""
-                _log(f"    [{done_count}/{n}] {test_name}{issues_tag}")
-                raw_issues.extend(per_file)
+                _log(f"    [{done_count}/{n}] {test_name}{_consume(per_file)}")
 
         _log(f"  All {n} reviews done [{_time.monotonic() - t0:.1f}s]")
 
-    if not raw_issues:
+    forced_issues = _forced_issues_from_failed_checks(raw_literal_checks)
+    if forced_issues:
+        _log(f"  Forced issues from failed literal checks: {len(forced_issues)}")
+
+    if not raw_issues and not forced_issues:
         _log("  Verdict pass…", end="")
         verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
         _log(f" done [{_time.monotonic() - t0:.1f}s total]")
         return AlignmentReview(**verdict)
 
-    _log(f"  Confirmation pass ({len(raw_issues)} candidate issues)…", end="")
-    confirmed = _confirmation_pass(
-        prompt_md, raw_issues, test_files,
-        max_tokens=max_confirm_tokens,
-    )
-    _log(f" done ({len(confirmed)} confirmed)")
+    if raw_issues:
+        _log(f"  Confirmation pass ({len(raw_issues)} candidate issues)…", end="")
+        confirmed = _confirmation_pass(
+            prompt_md, raw_issues, test_files,
+            max_tokens=max_confirm_tokens,
+        )
+        _log(f" done ({len(confirmed)} confirmed)")
+    else:
+        confirmed = []
+
+    final_issues = confirmed + forced_issues
 
     _log("  Verdict pass…", end="")
-    review = _parse_issues(confirmed)
-    verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=confirmed)
+    review = _parse_issues(final_issues)
+    verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=final_issues)
     review.confidence = verdict.get("confidence", "")
     review.verdict = verdict.get("verdict", "")
     _log(f" done [{_time.monotonic() - t0:.1f}s total]")
@@ -307,7 +355,8 @@ def _review_single_test(
     *,
     max_tokens: int,
     gap_context: str = "",
-) -> list[dict]:
+    assertion_context: str = "",
+) -> dict:
     gap_section = ""
     if gap_context and "No deterministic gaps" not in gap_context:
         gap_section = f"""
@@ -317,6 +366,13 @@ def _review_single_test(
 The above gaps were found by automated analysis. For each gap, decide
 whether it represents a real prompt-grader mismatch or a false positive.
 Include confirmed gaps as issues in your output.
+"""
+
+    assertion_section = ""
+    if assertion_context:
+        assertion_section = f"""
+=== ASSERTED TEST LITERALS (cross-check every one against the prompt) ===
+{assertion_context}
 """
 
     user_prompt = f"""{REVIEW_SYSTEM_PROMPT}
@@ -329,16 +385,46 @@ Include confirmed gaps as issues in your output.
 
 === TASK METADATA ===
 {task_summary or "(none)"}
-{gap_section}
+{gap_section}{assertion_section}
 
 For EACH assertion in the test file, check whether the prompt gives enough \
 information to produce the exact expected value. Report every case where an \
 agent would need to guess. Be thorough — check output shapes, error conditions, \
 execution order, exact string formatting, and edge cases.
 
-If there are genuinely no issues, output {{"issues": []}}.
+For every literal in ASSERTED TEST LITERALS, run this 4-step check:
+  1. Read the test case and identify the INPUT the agent's code receives.
+  2. Find which regex/pattern/rule in the prompt would match that input.
+  3. Find the SUBSTITUTION the prompt prescribes for that rule (what exact \
+     string it replaces the match with — call helpers, format strings, literal \
+     constants).
+  4. Mentally execute the substitution on the test input. Would the result \
+     contain the asserted literal VERBATIM?
+
+If step 4 is "no" — the prompt's substitution rule would produce a DIFFERENT \
+string than the asserted literal — that is a direct_contradiction with \
+safe_to_fix=true. Flag it with grader_evidence = the test assertion and \
+prompt_evidence = the contradicting substitution instruction.
+
+Do NOT accept "the literal is mentioned somewhere in the prompt as an example" \
+as proof the rule produces it. The prompt can describe expected output in one \
+place and prescribe a contradicting rule in another — that is exactly the bug \
+you are here to catch.
+
 Output strict JSON matching this schema:
 {{
+  "literal_checks": [
+    {{
+      "literal": "<exact literal string from ASSERTED TEST LITERALS>",
+      "polarity": "in" | "not_in" | "eq",
+      "test_input": "<the input value the agent's code receives in the relevant test>",
+      "matching_rule": "<the specific prompt instruction / Node N / bullet that governs this input, verbatim or tight paraphrase>",
+      "simulated_output": "<what the prompt's rule would actually emit when run on test_input>",
+      "matches_literal": true | false,
+      "note": "<one short sentence — required when matches_literal is false, optional otherwise>"
+    }}
+    // one entry per literal in ASSERTED TEST LITERALS
+  ],
   "issues": [
     {{
       "severity": "error",
@@ -350,15 +436,48 @@ Output strict JSON matching this schema:
       "safe_to_fix": true
     }}
   ]
-}}"""
+}}
+
+Rules for literal_checks:
+- One entry per literal in ASSERTED TEST LITERALS. Do not skip any.
+- For polarity "in": matches_literal is true iff simulated_output contains the \
+  literal VERBATIM as a substring. For "not_in": matches_literal is true iff \
+  simulated_output does NOT contain the literal. For "eq": matches_literal is \
+  true iff simulated_output equals the literal exactly.
+- Do NOT also add an `issues` entry for failed literal checks — the fixer \
+  converts every matches_literal=false into a direct_contradiction fix \
+  automatically. The `issues` array is only for problems the literal-check \
+  schema does not cover."""
 
     response = call_text_llm(user_prompt, max_tokens=max_tokens, expect_json=True)
     if response is None:
         response = call_text_llm(user_prompt, max_tokens=max_tokens, expect_json=True)
-    if response is None:
-        return []
 
-    return _parse_raw_issues_json(response)
+    _dump_review_debug(test_name, response)
+
+    if response is None:
+        _log(
+            f"    [WARN] reviewer returned unparseable/empty JSON for {test_name} — "
+            "alignment check for this file was SKIPPED. Set AST_PILOT_DEBUG_REVIEW=<dir> "
+            "to capture the raw response."
+        )
+        return {"issues": [], "literal_checks": []}
+
+    return _parse_review_response(response)
+
+
+def _dump_review_debug(test_name: str, response: str | None) -> None:
+    """When AST_PILOT_DEBUG_REVIEW is set, write the raw reviewer response to disk."""
+    debug_dir = os.environ.get("AST_PILOT_DEBUG_REVIEW")
+    if not debug_dir:
+        return
+    dp = Path(debug_dir)
+    dp.mkdir(parents=True, exist_ok=True)
+    safe_name = test_name.replace("/", "_")
+    (dp / f"{safe_name}.review.raw.txt").write_text(
+        response if response is not None else "<response was None>",
+        encoding="utf-8",
+    )
 
 
 def _get_confidence_verdict(
@@ -450,10 +569,110 @@ def _parse_raw_issues_json(text: str) -> list[dict]:
     return []
 
 
+def _parse_review_response(text: str) -> dict:
+    """Parse a reviewer response into ``{'issues': [...], 'literal_checks': [...]}``.
+
+    Tolerant to models that return only ``issues`` (older schema) or only
+    ``literal_checks``.
+    """
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+    if not isinstance(data, dict):
+        return {"issues": [], "literal_checks": []}
+    issues = data.get("issues")
+    checks = data.get("literal_checks")
+    return {
+        "issues": issues if isinstance(issues, list) else [],
+        "literal_checks": checks if isinstance(checks, list) else [],
+    }
+
+
+def _forced_issues_from_failed_checks(literal_checks: list[dict]) -> list[dict]:
+    """Convert ``matches_literal=false`` entries into direct_contradiction issues.
+
+    Deduplicates on (literal, polarity) so parallel reviews cannot double-report
+    the same asserted literal.
+    """
+    forced: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for check in literal_checks:
+        if not isinstance(check, dict):
+            continue
+        if check.get("matches_literal") is not False:
+            continue
+        literal = str(check.get("literal", "")).strip()
+        if not literal:
+            continue
+        polarity = str(check.get("polarity", "in")).strip() or "in"
+        key = (literal, polarity)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rule = str(check.get("matching_rule", "")).strip()
+        simulated = str(check.get("simulated_output", "")).strip()
+        note = str(check.get("note", "")).strip()
+
+        polarity_desc = {
+            "in": "must APPEAR in output",
+            "not_in": "must NOT appear in output",
+            "eq": "output must EQUAL",
+        }.get(polarity, polarity)
+
+        rationale = (
+            f"The prompt's rule, when executed on the test input, emits "
+            f"{simulated!r} instead. Rewrite the rule so it emits {literal!r} verbatim."
+        )
+        if note:
+            rationale = f"{rationale} Reviewer note: {note}"
+
+        forced.append({
+            "severity": "error",
+            "category": "direct_contradiction",
+            "title": f"Prompt rule does not reproduce asserted literal {literal!r}",
+            "prompt_evidence": rule,
+            "grader_evidence": f"Test asserts {literal!r} {polarity_desc}.",
+            "rationale": rationale,
+            "safe_to_fix": True,
+        })
+    return forced
+
+
+_SELF_ADMITTED_NON_ISSUE_MARKERS = (
+    "not a genuine issue",
+    "not a real issue",
+    "not an issue",
+    "false positive",
+    "does not represent a real",
+    "is already specified",
+    "is already documented",
+)
+
+
+def _is_self_admitted_non_issue(rationale: str) -> bool:
+    """Detect issues whose rationale text admits they are not real.
+
+    Models sometimes return ``severity=error, safe_to_fix=false`` while the
+    rationale says ``"This is NOT a genuine issue"``. Without this filter those
+    self-contradictory entries block promotion with no one to fix them.
+    """
+    lowered = rationale.lower()
+    return any(marker in lowered for marker in _SELF_ADMITTED_NON_ISSUE_MARKERS)
+
+
 def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
     issues: list[AlignmentIssue] = []
     for raw in raw_issues:
         if not isinstance(raw, dict):
+            continue
+        rationale = str(raw.get("rationale", ""))
+        if _is_self_admitted_non_issue(rationale):
+            _log(
+                "    [FILTERED non-issue] "
+                f"{raw.get('title', '')[:100]} — rationale admits this isn't real"
+            )
             continue
         try:
             issues.append(AlignmentIssue(
@@ -462,7 +681,7 @@ def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
                 title=str(raw.get("title", "")),
                 prompt_evidence=str(raw.get("prompt_evidence", "")),
                 grader_evidence=str(raw.get("grader_evidence", "")),
-                rationale=str(raw.get("rationale", "")),
+                rationale=rationale,
                 safe_to_fix=bool(raw.get("safe_to_fix", False)),
             ))
         except (TypeError, ValueError):

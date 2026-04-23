@@ -1,0 +1,22 @@
+{
+  "include": ["src"],
+  "exclude": ["**/*.spec.ts", "**/*.test.ts"],
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "lib": ["esnext"],
+    "importHelpers": false,
+    "declaration": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "downlevelIteration": true,
+    "skipLibCheck": true
+  }
+}

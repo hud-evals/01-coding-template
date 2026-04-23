@@ -16,7 +16,7 @@ from .evidence import (
     RuntimeAsset,
     TestEvidence,
 )
-from .repo_support import find_repo_context
+from .repo_support import find_repo_context, module_name_from_path
 from .runtime_assets import collect_runtime_assets
 
 try:
@@ -36,9 +36,13 @@ def scan(
     ev = Evidence(project_name=project_name)
     ev.python_version = _detect_python_version(source_paths)
 
+    resolved_source_paths = [Path(p).resolve() for p in source_paths if Path(p).exists()]
+    source_repo = find_repo_context(resolved_source_paths) if resolved_source_paths else None
+
     for p in source_paths:
         mod = _scan_module(Path(p))
         if mod:
+            _annotate_module_with_repo_context(mod, source_repo)
             ev.source_files.append(mod)
             ev.total_loc += mod.line_count
 
@@ -53,6 +57,25 @@ def scan(
     ev.dependencies = _collect_third_party_deps(ev)
     ev.runtime_assets = _collect_runtime_asset_evidence(source_paths, test_paths or [])
     return ev
+
+
+def _annotate_module_with_repo_context(mod: ModuleInfo, repo) -> None:
+    """Resolve the dotted module name + workspace target path from repo context.
+
+    Falls back to the flat basename when no repo root was detected, so
+    single-file scans keep working exactly as before.
+    """
+    path = Path(mod.path)
+    if repo is not None:
+        dotted = module_name_from_path(
+            path, repo.root, import_roots=repo.import_roots
+        )
+        if dotted:
+            mod.dotted_module_name = dotted
+            mod.workspace_rel_path = dotted.replace(".", "/") + ".py"
+            return
+    mod.dotted_module_name = mod.module_name
+    mod.workspace_rel_path = path.name
 
 
 def _collect_runtime_asset_evidence(

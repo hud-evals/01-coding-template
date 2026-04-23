@@ -56,12 +56,26 @@ def call_text_llm(
         return None
 
     if expect_json:
+        text = _strip_markdown_fences(text)
         try:
             json.loads(text)
         except (json.JSONDecodeError, TypeError):
             return None
 
     return text
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove surrounding ```json fences some models insist on emitting."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].lstrip("`").strip().lower() in ("", "json"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    return stripped
 
 
 def _get_client():

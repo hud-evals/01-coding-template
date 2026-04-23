@@ -119,8 +119,8 @@ def _section_instructions(ev: Evidence, use_llm: bool) -> str:
         prompt = f"""Write detailed natural language instructions for rebuilding this Python library from scratch.
 
 CRITICAL RULES:
-- The solution files live directly in `{WORKSPACE_DIR}`. Do NOT tell the agent to rely on editable installs or hidden package paths.
-- Hidden tests import the implementation as top-level module file(s): {target_files}.
+- The solution files live under `{WORKSPACE_DIR}`. Create any needed subdirectories exactly as listed. Do NOT tell the agent to rely on editable installs or hidden package paths.
+- Hidden tests import the solution from these workspace-relative paths: {target_files}. Preserve the directory structure shown — a file at `pkg/module.py` must be imported as `from pkg.module import ...`.
 - Every symbol in the REQUIRED TESTED SYMBOLS section below must exist, including underscored/private helpers.
 - If the original source depended on repo-internal modules, tell the agent to recreate the needed behavior locally instead of trying to install private packages.
 - You MUST use the EXACT function/method signatures provided below. Do NOT change parameter names, types, defaults, or return types.
@@ -156,8 +156,8 @@ Start with "## Natural Language Instructions" and include a short bullet list of
     # Deterministic fallback
     lines = ["## Natural Language Instructions", ""]
     lines.append("Before you start:")
-    lines.append(f"- Create and edit the solution directly in `{WORKSPACE_DIR}`.")
-    lines.append(f"- The hidden tests import these top-level module file(s): {target_files}.")
+    lines.append(f"- Create and edit the solution under `{WORKSPACE_DIR}` at the exact workspace-relative paths below.")
+    lines.append(f"- Workspace-relative paths for hidden-test imports: {target_files}.")
     lines.append("- Implement every symbol listed in `Required Tested Symbols`, including underscored/private helpers.")
     lines.append("- Recreate any repo-internal helper behavior locally instead of trying to install private packages.")
     lines.append("")
@@ -203,12 +203,12 @@ def _section_environment(ev: Evidence) -> str:
 
     lines.append("### Workspace")
     lines.append("")
-    lines.append(f"- Put the implementation directly under `{WORKSPACE_DIR}`.")
+    lines.append(f"- Put the implementation under `{WORKSPACE_DIR}` at the exact workspace-relative paths listed below.")
     lines.append("- Your shell may start in a different current directory, so `cd` into the workspace or use paths that write there explicitly.")
     target_files = _workspace_target_files(ev)
     if target_files:
         rendered_targets = ", ".join(f"`{name}`" for name in target_files)
-        lines.append(f"- Hidden tests import the solution as top-level module file(s): {rendered_targets}.")
+        lines.append(f"- Hidden tests import the solution from: {rendered_targets}. A file at `pkg/mod.py` must resolve as `from pkg.mod import ...`.")
     lines.append("")
 
     if external_deps:
@@ -423,14 +423,18 @@ def _describe_internal_dependency(module_name: str, imported_names: set[str]) ->
 
 
 def _workspace_target_files(ev: Evidence) -> list[str]:
+    """Workspace-relative paths where the agent must create each solution
+    file (e.g. ``agent/retry_utils.py`` for a nested package). Falls back
+    to the basename when the scanner could not resolve a repo-aware path
+    (single-file mode)."""
     files: list[str] = []
     seen: set[str] = set()
     for mod in ev.source_files:
-        name = Path(mod.path).name
-        if not name or name in seen or name == "__init__.py":
+        rel = mod.workspace_rel_path or Path(mod.path).name
+        if not rel or rel in seen or Path(rel).name == "__init__.py":
             continue
-        seen.add(name)
-        files.append(name)
+        seen.add(rel)
+        files.append(rel)
     return files
 
 
@@ -442,15 +446,52 @@ def _section_directory_structure(ev: Evidence) -> str:
     lines = ["## Project Directory Structure", "", "```"]
     lines.append("workspace/")
 
-    lines.append("├── pyproject.toml")
+    entries: list[tuple[str, str]] = [("pyproject.toml", "")]
     for name in _workspace_target_files(ev):
-        lines.append(f"├── {name}")
+        entries.append((name, ""))
     for asset in ev.runtime_assets:
         marker = " (provided)" if asset.kind == "bundled" else " (you create)"
-        lines.append(f"├── {asset.rel_path}{marker}")
+        entries.append((asset.rel_path, marker))
 
+    lines.extend(_render_tree(entries))
     lines.append("```")
     return "\n".join(lines)
+
+
+def _render_tree(entries: list[tuple[str, str]]) -> list[str]:
+    """Render a list of workspace-relative paths (with optional markers) as a tree.
+
+    Group shared prefixes so that nested paths are shown with directory
+    lines above the file lines:
+
+        ├── agent/
+        │   ├── retry_utils.py
+        │   └── redact.py
+    """
+    tree: dict = {}
+    for rel, marker in entries:
+        parts = rel.split("/")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part + "/", {})
+        node[parts[-1]] = marker
+    return _walk_tree(tree, prefix="")
+
+
+def _walk_tree(node: dict, prefix: str) -> list[str]:
+    lines: list[str] = []
+    keys = list(node.keys())
+    for idx, key in enumerate(keys):
+        is_last = idx == len(keys) - 1
+        branch = "└── " if is_last else "├── "
+        child_prefix = "    " if is_last else "│   "
+        value = node[key]
+        if isinstance(value, dict):
+            lines.append(f"{prefix}{branch}{key}")
+            lines.extend(_walk_tree(value, prefix + child_prefix))
+        else:
+            lines.append(f"{prefix}{branch}{key}{value}")
+    return lines
 
 
 # ---------------------------------------------------------------------------

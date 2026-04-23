@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
-import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +50,10 @@ class SourceContext:
     source_paths: tuple[Path, ...]
     test_paths: tuple[Path, ...]
     target_module_map: dict[str, str]
+    """Maps original dotted module name (e.g. ``agent.retry_utils``) to the
+    workspace-relative path the agent must create (``agent/retry_utils.py``).
+    Flat single-file scans collapse this to ``{stem: stem.py}``."""
+
     support_modules: frozenset[str]
     support_requirements: tuple[str, ...]
     bundled_assets: tuple[tuple[str, Path], ...] = ()
@@ -90,12 +94,17 @@ def generate_graders(
     for generated_test in sorted(paths.tests_dir.glob("*.py")):
         files[f"tasks/{paths.slug}/tests/{generated_test.name}"] = generated_test.read_text(encoding="utf-8")
 
+    golden_rel_paths = sorted(
+        path.relative_to(paths.golden_dir).as_posix()
+        for path in paths.golden_dir.rglob("*.py")
+    )
     task_py = _generate_task_py(
         ev=ev,
         slug=paths.slug,
         test_files=test_files,
-        golden_files=sorted(path.name for path in paths.golden_dir.glob("*.py")),
+        golden_files=golden_rel_paths,
         support_enabled=bool(source_ctx.support_modules),
+        has_hidden_requirements=bool(source_ctx.support_requirements),
         bundled_asset_paths=tuple(rel for rel, _ in source_ctx.bundled_assets),
     )
     _write(paths.task_dir / "task.py", task_py)
@@ -283,12 +292,32 @@ def _load_prompt(output_root: Path, project_name: str, prompt_md: str | None = N
 
 def _write_golden_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[str, str]:
     files: dict[str, str] = {}
+    workspace_rel_by_abs = _workspace_rel_by_abs_path(source_ctx)
     for source_path in source_ctx.source_paths:
         content = source_path.read_text(encoding="utf-8", errors="replace")
         content = _rewrite_source_relative_imports(content, source_ctx.repo, source_path)
-        _write(paths.golden_dir / source_path.name, content)
-        files[f"tasks/{paths.slug}/golden/{source_path.name}"] = content
+        workspace_rel = workspace_rel_by_abs.get(source_path.resolve(), source_path.name)
+        destination = paths.golden_dir / workspace_rel
+        _write(destination, content)
+        files[f"tasks/{paths.slug}/golden/{workspace_rel}"] = content
     return files
+
+
+def _workspace_rel_by_abs_path(source_ctx: SourceContext) -> dict[Path, str]:
+    """Map resolved source abs path → its workspace-relative target path."""
+    result: dict[Path, str] = {}
+    for source_path in source_ctx.source_paths:
+        if source_ctx.repo is not None:
+            module_name = module_name_from_path(
+                source_path,
+                source_ctx.repo.root,
+                import_roots=source_ctx.repo.import_roots,
+            )
+        else:
+            module_name = None
+        rel = source_ctx.target_module_map.get(module_name or "", "")
+        result[source_path.resolve()] = rel or source_path.name
+    return result
 
 
 def _rewrite_source_relative_imports(
@@ -362,18 +391,32 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
 
         for target_module in source_ctx.target_module_map:
             modules_to_copy.update(ancestor_package_paths(target_module, repo.module_index))
-            modules_to_copy.add(target_module)
 
-        for module_name in sorted(modules_to_copy):
+        # Packages that contain a workspace target must stay *namespace*
+        # packages at grading time so Python merges the workspace and
+        # support directories onto one import root. Shipping a concrete
+        # ``pkg/__init__.py`` would turn ``pkg`` into a regular package,
+        # and Python would refuse to look outside that one directory for
+        # submodules like the agent's ``pkg/calc.py``.
+        overlap_packages = _packages_overlapping_with_targets(
+            source_ctx.target_module_map,
+            repo.module_index,
+        )
+
+        # Target modules are written at their real workspace path by the
+        # agent, not via a shim under support/, so we skip them here.
+        for module_name in sorted(modules_to_copy - set(source_ctx.target_module_map)):
             original_path = repo.module_index.get(module_name)
             if original_path is None:
                 continue
 
-            if module_name in source_ctx.target_module_map:
-                content = _build_target_shim(module_name, source_ctx.target_module_map[module_name])
-            else:
-                content = original_path.read_text(encoding="utf-8", errors="replace")
+            if (
+                original_path.name == "__init__.py"
+                and module_name in overlap_packages
+            ):
+                continue
 
+            content = original_path.read_text(encoding="utf-8", errors="replace")
             relative_path = module_path_from_name(module_name, original_path)
             destination = paths.support_dir / relative_path
             _write(destination, content)
@@ -396,11 +439,19 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
     return files
 
 
-def _build_target_shim(original_module: str, candidate_module: str) -> str:
-    return (
-        f'"""Shim for `{original_module}` used during hidden grading."""\n\n'
-        f"from {candidate_module} import *\n"
-    )
+def _packages_overlapping_with_targets(
+    target_module_map: dict[str, str],
+    module_index: dict[str, Path],
+) -> set[str]:
+    """Return the set of package modules that contain one or more workspace
+    target modules — their ``__init__.py`` files must be skipped at bundle
+    time so runtime support + workspace can merge as a namespace package."""
+
+    overlap: set[str] = set()
+    for target_module in target_module_map:
+        for ancestor in ancestor_package_paths(target_module, module_index):
+            overlap.add(ancestor)
+    return overlap
 
 
 def _write_test_files(
@@ -413,10 +464,10 @@ def _write_test_files(
     if source_ctx.test_paths:
         available_modules = source_ctx.support_modules | set(source_ctx.target_module_map)
         allow_unsupported_test_refs = _allow_unsupported_test_refs()
+        cross_module_warnings: list[str] = []
         for test_path in source_ctx.test_paths:
             original = test_path.read_text(encoding="utf-8", errors="replace")
-            rewritten = _rewrite_test_imports(original, source_ctx.target_module_map)
-            rewritten = _rewrite_repo_root_assignments(rewritten)
+            rewritten = _rewrite_repo_root_assignments(original)
             rewritten = _guard_unsupported_test_refs(
                 original_content=original,
                 rewritten_content=rewritten,
@@ -426,12 +477,25 @@ def _write_test_files(
                 allow_downgrades=allow_unsupported_test_refs,
             )
             rewritten = _prepend_workspace_syspath(rewritten)
+            warnings, skip_marks = _detect_cross_module_path_access(rewritten, test_path)
+            cross_module_warnings.extend(warnings)
+            rewritten = _insert_skip_marks(rewritten, skip_marks)
             destination = paths.tests_dir / test_path.name
             _write(destination, rewritten)
             files.append(test_path.name)
+        if cross_module_warnings:
+            print(
+                "[warn] hidden tests reach outside their own directory via "
+                "Path(__file__).parents[N] — auto-skipped at grading time "
+                "(pytest.mark.skip) so they don't block passing scores:",
+                file=sys.stderr,
+            )
+            for warning in cross_module_warnings:
+                print(f"  - {warning}", file=sys.stderr)
         return files
 
-    synthetic_name = f"test_{primary_module}.py"
+    synthetic_stem = primary_module.replace(".", "_")
+    synthetic_name = f"test_{synthetic_stem}.py"
     synthetic = _generate_synthetic_tests(ev, primary_module)
     _write(paths.tests_dir / synthetic_name, synthetic)
     files.append(synthetic_name)
@@ -444,6 +508,7 @@ def _generate_task_py(
     test_files: list[str],
     golden_files: list[str],
     support_enabled: bool,
+    has_hidden_requirements: bool = False,
     bundled_asset_paths: tuple[str, ...] = (),
 ) -> str:
     weight_per_check = round(1.0 / max(len(test_files), 1), 4)
@@ -472,10 +537,10 @@ def _generate_task_py(
 
     if support_enabled:
         pythonpath_expr = 'f"{WORKSPACE_DIR}:{runtime_support_dir}:$PYTHONPATH"'
-        prepare_expr = "_prepare_hidden_runtime(test_file, runtime_support_dir)"
+        stage_support_expr = "_stage_hidden_support(runtime_support_dir)"
     else:
         pythonpath_expr = repr(f"{WORKSPACE_DIR}:$PYTHONPATH")
-        prepare_expr = '""'
+        stage_support_expr = '""'
 
     assets_source_expr = "runtime_support_dir" if support_enabled else "_support_source_dir()"
     stage_assets_expr = (
@@ -484,11 +549,19 @@ def _generate_task_py(
         else '""'
     )
 
+    if has_hidden_requirements:
+        uv_cmd_expr = (
+            '"uv run --no-project --with pytest "'
+            ' f"--with-requirements {BUNDLED_HIDDEN_REQUIREMENTS} "'
+            ' "python -m pytest"'
+        )
+    else:
+        uv_cmd_expr = '"uv run --no-project --with pytest python -m pytest"'
+
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
         "import os",
-        "import hashlib",
         "from pathlib import Path",
         "",
         "from hud.eval.task import Task",
@@ -526,50 +599,20 @@ def _generate_task_py(
         "            return LEGACY_SUPPORT_DIR",
         "        return BUNDLED_SUPPORT_DIR",
         "",
-        "    def _requirements_marker() -> Path:",
-        '        digest = "none"',
-        "        if LOCAL_HIDDEN_REQUIREMENTS.is_file():",
-        "            digest = hashlib.sha256(LOCAL_HIDDEN_REQUIREMENTS.read_bytes()).hexdigest()[:12]",
-        '        return RUNTIME_ROOT / f".requirements-{digest}.ok"',
-        "",
-        "    def _prepare_hidden_runtime(test_file: str, runtime_support_dir: Path) -> str:",
-        '        """Build a bash command that exposes hidden support/runtime deps for grading."""',
+        "    def _stage_hidden_support(runtime_support_dir: Path) -> str:",
+        '        """Copy hidden support modules into a writable runtime directory."""',
         "        support_source = _support_source_dir()",
-        "        requirements_marker = _requirements_marker()",
         "        return (",
         '            "python - <<\'PY\'\\n"',
         '            "from pathlib import Path\\n"',
         '            "import shutil\\n"',
-        '            "import subprocess\\n"',
-        '            "import sys\\n"',
-        '            "import time\\n"',
         '            f"support_source = Path({str(support_source)!r})\\n"',
         '            f"runtime_support_dir = Path({str(runtime_support_dir)!r})\\n"',
-        '            f"hidden_requirements = Path({str(BUNDLED_HIDDEN_REQUIREMENTS)!r})\\n"',
-        '            f"requirements_marker = Path({str(requirements_marker)!r})\\n"',
-        '            f"requirements_lock = Path({str(requirements_marker.parent / (requirements_marker.name + \'.lock\'))!r})\\n"',
         '            "if support_source.is_dir():\\n"',
         '            "    if runtime_support_dir.exists():\\n"',
         '            "        shutil.rmtree(runtime_support_dir)\\n"',
         '            "    runtime_support_dir.parent.mkdir(parents=True, exist_ok=True)\\n"',
         '            "    shutil.copytree(support_source, runtime_support_dir)\\n"',
-        '            "if hidden_requirements.is_file() and not requirements_marker.exists():\\n"',
-        '            "    while True:\\n"',
-        '            "        try:\\n"',
-        '            "            requirements_lock.mkdir(parents=True, exist_ok=False)\\n"',
-        '            "            break\\n"',
-        '            "        except FileExistsError:\\n"',
-        '            "            if requirements_marker.exists():\\n"',
-        '            "                break\\n"',
-        '            "            time.sleep(0.1)\\n"',
-        '            "    if not requirements_marker.exists():\\n"',
-        '            "        try:\\n"',
-        '            "            subprocess.run([sys.executable, \'-m\', \'pip\', \'install\', \'--disable-pip-version-check\', \'-r\', str(hidden_requirements)], check=True)\\n"',
-        '            "            requirements_marker.parent.mkdir(parents=True, exist_ok=True)\\n"',
-        '            "            requirements_marker.write_text(\'ok\', encoding=\'utf-8\')\\n"',
-        '            "        finally:\\n"',
-        '            "            if requirements_lock.exists():\\n"',
-        '            "                requirements_lock.rmdir()\\n"',
         '            "PY\\n"',
         "        )",
         "",
@@ -587,19 +630,21 @@ def _generate_task_py(
         '        return "; ".join(parts) + "; "',
         "",
         f'    def _inject_and_run(test_file: str, workdir: str = "{WORKSPACE_DIR}") -> str:',
-        '        """Build a bash command that writes a test file and runs pytest."""',
+        '        """Build a bash command that writes a test file and runs pytest via uv run."""',
         "        content = (TESTS_DIR / test_file).read_text()",
         '        runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"',
-        f"        prepare = {prepare_expr}",
+        f"        stage_support = {stage_support_expr}",
         f"        stage_assets = {stage_assets_expr}",
         f"        pythonpath = {pythonpath_expr}",
+        f"        uv_cmd = {uv_cmd_expr}",
         "        return (",
-        '            f"{prepare}"',
+        '            f"{stage_support}"',
         '            f"{stage_assets}"',
         '            f"cat > /tmp/{test_file} << \'TESTEOF\'\\n"',
         '            f"{content}\\n"',
         '            f"TESTEOF\\n"',
-        f'            f"cd {{workdir}} && {REPO_ROOT_ENV}={{workdir}} PYTHONPATH={{pythonpath}} python -m pytest /tmp/{{test_file}} -v"',
+        f'            f"cd {{workdir}} && {REPO_ROOT_ENV}={{workdir}} PYTHONPATH={{pythonpath}} "',
+        '            f"{uv_cmd} /tmp/{test_file} -v"',
         "        )",
         "",
         '    def _golden_setup(source_file: str, dest: str) -> str:',
@@ -672,24 +717,6 @@ def _generate_synthetic_tests(ev: Evidence, module_name: str) -> str:
     return "\n".join(lines)
 
 
-def _rewrite_test_imports(content: str, target_module_map: dict[str, str]) -> str:
-    rewritten = content
-    for original_module, candidate_module in sorted(target_module_map.items(), key=lambda item: len(item[0]), reverse=True):
-        rewritten = re.sub(
-            rf"(\bfrom\s+){re.escape(original_module)}(\s+import\b)",
-            rf"\1{candidate_module}\2",
-            rewritten,
-        )
-        rewritten = re.sub(
-            rf"(\bimport\s+){re.escape(original_module)}(\b)",
-            rf"\1{candidate_module}\2",
-            rewritten,
-        )
-        for quote in ('"', "'"):
-            rewritten = rewritten.replace(f"{quote}{original_module}.", f"{quote}{candidate_module}.")
-    return rewritten
-
-
 def _rewrite_repo_root_assignments(content: str) -> str:
     """Rewrite module-level ``REPO_ROOT``/``HERE``/... assignments that derive
     from ``__file__`` to read ``AST_PILOT_REPO_ROOT`` instead.
@@ -755,6 +782,74 @@ def _references_dunder_file(node: ast.AST) -> bool:
         if isinstance(child, ast.Name) and child.id == "__file__":
             return True
     return False
+
+
+def _detect_cross_module_path_access(
+    content: str, test_path: Path
+) -> tuple[list[str], list[tuple[int, str]]]:
+    """Find ``Path(__file__).parents[N]`` patterns that walk outside the
+    test's own directory. Tests are staged at ``/tmp/<name>.py`` at grading
+    time, so any filesystem anchor derived from ``__file__`` resolves to
+    ``/tmp`` — not the agent workspace or a sibling module tree.
+
+    Returns ``(warnings, skip_marks)``. ``skip_marks`` is a list of
+    ``(lineno, reason)`` for each test method containing the offending
+    expression, ready to feed to :func:`_insert_skip_marks`.
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return [], []
+
+    warnings: list[str] = []
+    skip_marks: list[tuple[int, str]] = []
+    for fn in _iter_test_functions(tree):
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Subscript):
+                continue
+            target = node.value
+            if not isinstance(target, ast.Attribute) or target.attr != "parents":
+                continue
+            if not _references_dunder_file(target.value):
+                continue
+            index_repr = "?"
+            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
+                index_repr = str(node.slice.value)
+            reason = (
+                f"cross-module Path(__file__).parents[{index_repr}] "
+                "— unsupported at grading time"
+            )
+            warnings.append(
+                f"{test_path.name}:{node.lineno} uses Path(__file__).parents[{index_repr}] "
+                "— resolves to /tmp at grading time, not the agent workspace"
+            )
+            skip_marks.append((fn.lineno, reason))
+            break
+    return warnings, skip_marks
+
+
+def _iter_test_functions(tree: ast.AST):
+    """Yield every ``def test_*`` FunctionDef in ``tree``, nested or not."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test"):
+            yield node
+
+
+def _insert_skip_marks(content: str, marks: list[tuple[int, str]]) -> str:
+    """Prepend ``@pytest.mark.skip(reason=...)`` decorators to test methods."""
+    if not marks:
+        return content
+    lines = content.splitlines()
+    for offset, (lineno, reason) in enumerate(sorted(marks, key=lambda item: item[0])):
+        index = lineno - 1 + offset
+        if index < 0 or index >= len(lines):
+            continue
+        indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+        decorator = f'{indent}@__import__("pytest").mark.skip(reason={reason!r})'
+        if index > 0 and lines[index - 1].strip() == decorator.strip():
+            continue
+        lines.insert(index, decorator)
+    return "\n".join(lines)
 
 
 def _ensure_os_import(content: str) -> str:
@@ -985,9 +1080,14 @@ def _find_header_insert_at(lines: list[str]) -> int:
 
 
 def _primary_module_name(ev: Evidence, source_ctx: SourceContext) -> str:
+    if source_ctx.target_module_map:
+        return next(iter(source_ctx.target_module_map.keys()))
     if source_ctx.source_paths:
         return source_ctx.source_paths[0].stem
     if ev.source_files:
+        dotted = ev.source_files[0].dotted_module_name
+        if dotted:
+            return dotted
         return Path(ev.source_files[0].path).stem
     return _pkg_name(ev.project_name)
 
@@ -996,35 +1096,47 @@ def _build_target_module_map(
     resolved_sources: tuple[Path, ...],
     repo: RepoContext | None,
 ) -> dict[str, str]:
+    """Return ``{dotted_module_name: workspace_rel_path}`` for each target source.
+
+    The workspace-rel path mirrors the dotted name (``agent.retry_utils`` →
+    ``agent/retry_utils.py``), so the agent writes the file at a path that
+    matches the import statements in the hidden tests. Single-file scans
+    without a detected repo root collapse to ``{stem: basename}``.
+    """
     module_pairs: list[tuple[str, Path]] = []
-    stem_to_paths: dict[str, list[Path]] = {}
+    rel_path_to_sources: dict[str, list[Path]] = {}
 
     for source_path in resolved_sources:
         if repo is not None:
-            module_name = module_name_from_path(source_path, repo.root, import_roots=repo.import_roots)
+            module_name = module_name_from_path(
+                source_path, repo.root, import_roots=repo.import_roots
+            )
         else:
             module_name = source_path.stem
         if not module_name:
             continue
         module_pairs.append((module_name, source_path))
-        stem_to_paths.setdefault(source_path.stem, []).append(source_path)
+
+    target_map: dict[str, str] = {}
+    for module_name, source_path in module_pairs:
+        workspace_rel = module_name.replace(".", "/") + ".py"
+        target_map[module_name] = workspace_rel
+        rel_path_to_sources.setdefault(workspace_rel, []).append(source_path)
 
     duplicates = {
-        stem: paths
-        for stem, paths in stem_to_paths.items()
-        if len(paths) > 1
+        rel: paths for rel, paths in rel_path_to_sources.items() if len(paths) > 1
     }
     if duplicates:
         rendered = ", ".join(
-            f"{stem} -> {', '.join(str(path) for path in paths)}"
-            for stem, paths in sorted(duplicates.items())
+            f"{rel} -> {', '.join(str(path) for path in paths)}"
+            for rel, paths in sorted(duplicates.items())
         )
         raise ValueError(
-            "Selected source files would collapse to the same workspace module name. "
-            f"Choose modules with distinct filenames or generate separate tasks: {rendered}"
+            "Selected source files map to the same workspace path. "
+            f"Resolve the collision before generating: {rendered}"
         )
 
-    return {module_name: source_path.stem for module_name, source_path in module_pairs}
+    return target_map
 
 
 def _allow_unsupported_test_refs() -> bool:

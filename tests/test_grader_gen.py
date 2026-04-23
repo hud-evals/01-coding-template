@@ -16,6 +16,8 @@ from ast_pilot.evidence import Evidence, ModuleInfo
 from ast_pilot.grader_gen import (
     REPO_ROOT_ENV,
     WORKSPACE_DIR,
+    _detect_cross_module_path_access,
+    _insert_skip_marks,
     _prepend_workspace_syspath,
     _rewrite_repo_root_assignments,
     generate_graders,
@@ -206,18 +208,17 @@ class GraderGenTests(unittest.TestCase):
                 test_paths=[test_path],
             )
 
-            golden = files["tasks/target-task/golden/target.py"]
+            golden = files["tasks/target-task/golden/agent/target.py"]
             rewritten_test = files["tasks/target-task/tests/test_target.py"]
             task_py = files["tasks/target-task/task.py"]
             requirements = files["tasks/target-task/requirements.hidden.txt"]
             support_auth = files["tasks/target-task/support/helpers/auth.py"]
             support_prompt_caching = files["tasks/target-task/support/helpers/prompt_caching.py"]
             support_other_module = files["tasks/target-task/support/other_module.py"]
-            support_shim = files["tasks/target-task/support/agent/target.py"]
             init_py = files["tasks/target-task/__init__.py"]
 
             self.assertIn("import helpers.auth as auth_mod", golden)
-            self.assertIn("from target import run", rewritten_test)
+            self.assertIn("from agent.target import run", rewritten_test)
             self.assertIn("other_module", rewritten_test)
             self.assertNotIn('@__import__("pytest").mark.xfail(', rewritten_test)
             self.assertNotIn("lambda *a, **kw", rewritten_test)
@@ -226,7 +227,9 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn('HELPER_VALUE = "ok"', support_auth)
             self.assertIn('return "cached"', support_prompt_caching)
             self.assertIn('return "sentinel"', support_other_module)
-            self.assertIn("from target import *", support_shim)
+            # With nested layout, the target module lives at its real workspace
+            # path (agent/target.py). No shim under support/ is needed.
+            self.assertNotIn("tasks/target-task/support/agent/target.py", files)
             self.assertIn('IMAGE_TASK_DIR = Path("/mcp_server/tasks") / TASK_DIR.name', task_py)
             self.assertIn("LEGACY_SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
             self.assertIn("from task_bootstrap import require_hud_env_name", task_py)
@@ -237,10 +240,13 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn('WORKSPACE_DIR = "/home/ubuntu/workspace"', task_py)
             self.assertIn('LOCAL_HIDDEN_REQUIREMENTS = TASK_DIR / "requirements.hidden.txt"', task_py)
             self.assertIn('BUNDLED_HIDDEN_REQUIREMENTS = IMAGE_TASK_DIR / "requirements.hidden.txt"', task_py)
-            self.assertIn("def _prepare_hidden_runtime(test_file: str, runtime_support_dir: Path) -> str:", task_py)
+            self.assertIn("def _stage_hidden_support(runtime_support_dir: Path) -> str:", task_py)
             self.assertIn('runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"', task_py)
-            self.assertIn("prepare = _prepare_hidden_runtime(test_file, runtime_support_dir)", task_py)
+            self.assertIn("stage_support = _stage_hidden_support(runtime_support_dir)", task_py)
             self.assertIn('pythonpath = f"{WORKSPACE_DIR}:{runtime_support_dir}:$PYTHONPATH"', task_py)
+            self.assertIn("uv run --no-project --with pytest", task_py)
+            self.assertIn("--with-requirements {BUNDLED_HIDDEN_REQUIREMENTS}", task_py)
+            self.assertNotIn("pip install", task_py)
             self.assertIn("HUD_ENV_NAME is required", task_py)
             self.assertIn("env = Environment(ENV_NAME)", task_py)
             self.assertNotIn("mario-claire", task_py)
@@ -337,11 +343,11 @@ class GraderGenTests(unittest.TestCase):
 
             rewritten_test = files["tasks/target-task/tests/test_target.py"]
             support_auth = files["tasks/target-task/support/helpers/auth.py"]
-            support_shim = files["tasks/target-task/support/agent/target.py"]
 
-            self.assertIn("from target import run", rewritten_test)
+            self.assertIn("from agent.target import run", rewritten_test)
             self.assertIn('return "auth"', support_auth)
-            self.assertIn("from target import *", support_shim)
+            self.assertNotIn("tasks/target-task/support/agent/target.py", files)
+            self.assertIn("tasks/target-task/golden/agent/target.py", files)
             self.assertNotIn("tasks/target-task/support/src/helpers/auth.py", files)
 
     def test_bundle_fails_when_hidden_tests_need_unsupported_internal_modules(self) -> None:
@@ -948,14 +954,17 @@ class GraderGenTests(unittest.TestCase):
             rewritten_test = (
                 out_dir / "tasks" / "src-nested" / "tests" / "test_models.py"
             ).read_text(encoding="utf-8")
-            self.assertIn("from models import User", rewritten_test)
+            self.assertIn("from src.models import User", rewritten_test)
 
             support_files = sorted(
                 p.relative_to(out_dir / "tasks" / "src-nested" / "support")
                 for p in (out_dir / "tasks" / "src-nested" / "support").rglob("*.py")
             )
             self.assertIn(Path("src/helpers.py"), support_files)
-            self.assertIn(Path("src/__init__.py"), support_files)
+            # ``src/__init__.py`` is intentionally skipped — ``src`` must
+            # stay a PEP 420 namespace package so workspace + support
+            # merge onto one import root for ``src.models`` + ``src.helpers``.
+            self.assertNotIn(Path("src/__init__.py"), support_files)
 
     def test_golden_file_rewrites_relative_imports_to_absolute(self) -> None:
         """``from .helpers import X`` in source files must be rewritten
@@ -1016,7 +1025,7 @@ class GraderGenTests(unittest.TestCase):
             )
 
             golden = (
-                out_dir / "tasks" / "rel-imports" / "golden" / "models.py"
+                out_dir / "tasks" / "rel-imports" / "golden" / "mypkg" / "models.py"
             ).read_text(encoding="utf-8")
             self.assertIn("from mypkg.helpers import upper", golden)
             self.assertNotIn("from .helpers import upper", golden)
@@ -1070,7 +1079,7 @@ class GraderGenTests(unittest.TestCase):
             )
 
             golden = (
-                out_dir / "tasks" / "bare-rel" / "golden" / "facade.py"
+                out_dir / "tasks" / "bare-rel" / "golden" / "mypkg" / "facade.py"
             ).read_text(encoding="utf-8")
             self.assertIn("from mypkg import sub", golden)
 
@@ -1122,9 +1131,175 @@ class GraderGenTests(unittest.TestCase):
             )
 
             golden = (
-                out_dir / "tasks" / "abs-imports" / "golden" / "models.py"
+                out_dir / "tasks" / "abs-imports" / "golden" / "mypkg" / "models.py"
             ).read_text(encoding="utf-8")
             self.assertIn("from mypkg.helpers import upper", golden)
+
+    def test_nested_package_preserves_workspace_rel_path(self) -> None:
+        """Source file inside a repo-internal package must be staged at
+        its nested path (``agent/retry_utils.py``) in both golden/ and at
+        grading time — hidden tests keep their original
+        ``from agent.retry_utils import …`` unchanged."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "nested-pkg"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            pkg_dir = root / "agent"
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+            source_path = pkg_dir / "retry_utils.py"
+            source_path.write_text(
+                "def jittered_backoff(attempt: int) -> float:\n"
+                "    return 1.0 * attempt\n",
+                encoding="utf-8",
+            )
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_path = tests_dir / "test_retry.py"
+            test_path.write_text(
+                "from agent.retry_utils import jittered_backoff\n\n"
+                "def test_backoff():\n"
+                "    assert jittered_backoff(2) == 2.0\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[source_path],
+                test_paths=[test_path],
+                project_name="nested-pkg",
+            )
+
+            out_dir = root / "out"
+            files = generate_graders(
+                ev,
+                output_dir=out_dir,
+                prompt_md="# nested-pkg\n",
+                source_paths=[source_path],
+                test_paths=[test_path],
+            )
+
+            # Golden lives at its nested workspace path.
+            self.assertIn("tasks/nested-pkg/golden/agent/retry_utils.py", files)
+            # No shim under support/ — the module is at the real workspace path.
+            self.assertNotIn("tasks/nested-pkg/support/agent/retry_utils.py", files)
+
+            # Test file keeps its original import — no flat rewrite.
+            rewritten_test = files["tasks/nested-pkg/tests/test_retry.py"]
+            self.assertIn("from agent.retry_utils import jittered_backoff", rewritten_test)
+            self.assertNotIn("from retry_utils import jittered_backoff", rewritten_test)
+
+            # task.py validation writes golden to the nested workspace path.
+            task_py = files["tasks/nested-pkg/task.py"]
+            self.assertIn(
+                "_golden_setup('agent/retry_utils.py', '/home/ubuntu/workspace/agent/retry_utils.py')",
+                task_py,
+            )
+
+    def test_nested_package_skips_init_py_for_overlap_packages(self) -> None:
+        """When the agent's target lives inside a package that also has
+        hidden support files (e.g. ``pkg/helpers.py``), the bundler must
+        skip ``pkg/__init__.py`` so ``pkg`` remains a PEP 420 namespace
+        package. Otherwise Python treats ``pkg`` as a regular package
+        rooted in support/ and refuses to see the workspace-written
+        ``pkg/<target>.py``."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "ns-pkg"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            pkg_dir = root / "pkg"
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+            (pkg_dir / "helpers.py").write_text(
+                "def double(x: int) -> int:\n    return x * 2\n",
+                encoding="utf-8",
+            )
+            source_path = pkg_dir / "calc.py"
+            source_path.write_text(
+                "from pkg.helpers import double\n\n"
+                "def add_then_double(a, b):\n    return double(a + b)\n",
+                encoding="utf-8",
+            )
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_path = tests_dir / "test_calc.py"
+            test_path.write_text(
+                "from pkg.calc import add_then_double\n\n"
+                "def test_it(): assert add_then_double(2, 3) == 10\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[source_path],
+                test_paths=[test_path],
+                project_name="ns-pkg",
+            )
+
+            out_dir = root / "out"
+            files = generate_graders(
+                ev,
+                output_dir=out_dir,
+                prompt_md="# ns-pkg\n",
+                source_paths=[source_path],
+                test_paths=[test_path],
+            )
+
+            # Helpers shipped; __init__.py intentionally skipped so the
+            # package remains a namespace package and merges the
+            # agent-written pkg/calc.py from the workspace with
+            # pkg/helpers.py from the support tree.
+            self.assertIn("tasks/ns-pkg/support/pkg/helpers.py", files)
+            self.assertNotIn("tasks/ns-pkg/support/pkg/__init__.py", files)
+            # Target is not shimmed under support/.
+            self.assertNotIn("tasks/ns-pkg/support/pkg/calc.py", files)
+
+    def test_flat_source_still_writes_flat_golden(self) -> None:
+        """Single-file scan (source at repo root) keeps the old flat
+        behavior — the workspace target is just ``<basename>.py``."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "flat-pkg"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            source_path = root / "foo.py"
+            source_path.write_text("def add(a, b): return a + b\n", encoding="utf-8")
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_path = tests_dir / "test_foo.py"
+            test_path.write_text(
+                "from foo import add\n\ndef test_add(): assert add(2, 3) == 5\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[source_path],
+                test_paths=[test_path],
+                project_name="flat-pkg",
+            )
+
+            out_dir = root / "out"
+            files = generate_graders(
+                ev,
+                output_dir=out_dir,
+                prompt_md="# flat-pkg\n",
+                source_paths=[source_path],
+                test_paths=[test_path],
+            )
+
+            self.assertIn("tasks/flat-pkg/golden/foo.py", files)
+            self.assertNotIn("tasks/flat-pkg/golden/agent/foo.py", files)
+            task_py = files["tasks/flat-pkg/task.py"]
+            self.assertIn(
+                "_golden_setup('foo.py', '/home/ubuntu/workspace/foo.py')",
+                task_py,
+            )
 
     def test_prepend_syspath_imports_sys_before_using_it(self) -> None:
         """`import sys` must appear before `sys.path.insert(...)` even when an
@@ -1160,6 +1335,135 @@ class GraderGenTests(unittest.TestCase):
             "import sys must be bound before sys.path.insert runs; "
             f"got order:\n{rewritten}",
         )
+
+    def test_detect_cross_module_path_access_flags_parents_subscript(self) -> None:
+        source = textwrap.dedent(
+            """
+            from pathlib import Path
+            def test_reads_sibling():
+                path = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+                assert path.exists()
+            """
+        ).strip() + "\n"
+        warnings, marks = _detect_cross_module_path_access(source, Path("test_foo.py"))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("test_foo.py", warnings[0])
+        self.assertIn("parents[2]", warnings[0])
+        self.assertEqual(len(marks), 1)
+        lineno, reason = marks[0]
+        self.assertIn("parents[2]", reason)
+        # Mark points at the `def test_reads_sibling` line (2nd non-blank line).
+        self.assertEqual(source.splitlines()[lineno - 1].strip(), "def test_reads_sibling():")
+
+    def test_detect_cross_module_path_access_flags_unresolved_parents(self) -> None:
+        source = textwrap.dedent(
+            """
+            from pathlib import Path
+            def test_reads_sibling():
+                path = Path(__file__).parents[1] / "data.json"
+            """
+        ).strip() + "\n"
+        warnings, marks = _detect_cross_module_path_access(source, Path("test_bar.py"))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("parents[1]", warnings[0])
+        self.assertEqual(len(marks), 1)
+
+    def test_detect_cross_module_path_access_ignores_parent_without_subscript(self) -> None:
+        source = textwrap.dedent(
+            """
+            from pathlib import Path
+            HERE = Path(__file__).parent
+            def test_ok():
+                pass
+            """
+        ).strip() + "\n"
+        warnings, marks = _detect_cross_module_path_access(source, Path("test_baz.py"))
+        self.assertEqual(warnings, [])
+        self.assertEqual(marks, [])
+
+    def test_detect_cross_module_path_access_ignores_parents_without_dunder_file(self) -> None:
+        source = textwrap.dedent(
+            """
+            from pathlib import Path
+            def test_arbitrary():
+                p = Path('/some/where').parents[1]
+            """
+        ).strip() + "\n"
+        warnings, marks = _detect_cross_module_path_access(source, Path("test_qux.py"))
+        self.assertEqual(warnings, [])
+        self.assertEqual(marks, [])
+
+    def test_insert_skip_marks_prepends_pytest_skip(self) -> None:
+        source = textwrap.dedent(
+            """
+            class TestSomething:
+                def test_reads_sibling(self):
+                    path = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+                    assert path.exists()
+            """
+        ).strip() + "\n"
+        warnings, marks = _detect_cross_module_path_access(source, Path("test_x.py"))
+        rewritten = _insert_skip_marks(source, marks)
+        self.assertIn('@__import__("pytest").mark.skip', rewritten)
+        self.assertIn("parents[2]", rewritten)
+        # Decorator must sit directly above the test method, preserving indentation.
+        decorator_line = next(
+            line for line in rewritten.splitlines() if "pytest" in line and "skip" in line
+        )
+        self.assertTrue(decorator_line.startswith("    @"))
+
+    def test_cross_module_test_is_auto_skipped_at_generation_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='demo'\nversion='0.1.0'\n",
+                encoding="utf-8",
+            )
+            (root / "app").mkdir()
+            (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+            source_path = root / "app" / "target.py"
+            source_path.write_text("def run(): return 1\n", encoding="utf-8")
+
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_path = tests_dir / "test_target.py"
+            test_path.write_text(
+                textwrap.dedent(
+                    """
+                    from pathlib import Path
+                    from app.target import run
+
+                    def test_run(): assert run() == 1
+
+                    def test_reads_sibling():
+                        p = Path(__file__).resolve().parents[2] / "other" / "file.py"
+                        assert p.exists()
+                    """
+                ).strip() + "\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[source_path],
+                test_paths=[test_path],
+                project_name="target-task",
+            )
+            files = generate_graders(
+                ev,
+                output_dir=root / "out",
+                prompt_md="# demo\n",
+                source_paths=[source_path],
+                test_paths=[test_path],
+            )
+            rewritten_test = files["tasks/target-task/tests/test_target.py"]
+            self.assertIn('@__import__("pytest").mark.skip', rewritten_test)
+            self.assertIn("parents[2]", rewritten_test)
+            # The plain passing test must NOT be decorated.
+            lines = rewritten_test.splitlines()
+            idx_passing = next(
+                i for i, line in enumerate(lines) if line.strip() == "def test_run(): assert run() == 1"
+            )
+            self.assertFalse(lines[idx_passing - 1].strip().startswith("@"))
 
 
 if __name__ == "__main__":
