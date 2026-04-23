@@ -11,6 +11,7 @@ from ast_pilot.grader_expectations import (
     compute_gaps,
     extract_grader_expectations,
     extract_prompt_surface,
+    format_asserted_literals_for_llm,
 )
 
 
@@ -77,6 +78,111 @@ class TestExtractGraderExpectations(unittest.TestCase):
         )
         exp = extract_grader_expectations([("test_x.py", test_code)])
         self.assertEqual(exp.imported_names.count("Foo"), 1)
+
+
+class TestExtractAssertionLiterals(unittest.TestCase):
+    def test_captures_assert_literal_in_result(self) -> None:
+        test_code = (
+            "def test_telegram():\n"
+            "    result = redact('bot123456789:abcdef')\n"
+            "    assert '123456789:***' in result\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertIn("123456789:***", exp.assertion_in_literals)
+        self.assertEqual(exp.assertion_not_in_literals, [])
+        self.assertEqual(exp.assertion_eq_literals, [])
+
+    def test_captures_assert_literal_not_in_result(self) -> None:
+        test_code = (
+            "def test_secret_redacted():\n"
+            "    result = redact('abc123def456')\n"
+            "    assert 'abc123def456' not in result\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertIn("abc123def456", exp.assertion_not_in_literals)
+        self.assertEqual(exp.assertion_in_literals, [])
+
+    def test_captures_assert_equality_literal(self) -> None:
+        test_code = (
+            "def test_noop():\n"
+            "    assert redact('HOME=/home/user') == 'HOME=/home/user'\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertIn("HOME=/home/user", exp.assertion_eq_literals)
+
+    def test_filters_short_literals(self) -> None:
+        test_code = (
+            "def test_short():\n"
+            "    assert 'x' in result\n"
+            "    assert 'ok' in result\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertEqual(exp.assertion_in_literals, [])
+
+    def test_ignores_non_literal_in_check(self) -> None:
+        test_code = (
+            "def test_contains():\n"
+            "    needle = 'foo'\n"
+            "    assert needle in result\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertEqual(exp.assertion_in_literals, [])
+
+    def test_dedupes_repeated_literals(self) -> None:
+        test_code = (
+            "def test_one():\n"
+            "    assert 'abc123def' in result\n"
+            "def test_two():\n"
+            "    assert 'abc123def' in result\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertEqual(exp.assertion_in_literals.count("abc123def"), 1)
+
+    def test_ts_toContain_captures_literal(self) -> None:
+        test_code = (
+            "it('redacts', () => {\n"
+            "  expect(redact('bot123456789:abcdef')).toContain('123456789:***');\n"
+            "});\n"
+        )
+        exp = extract_grader_expectations(
+            [("redact.test.ts", test_code)], language="typescript"
+        )
+        self.assertIn("123456789:***", exp.assertion_in_literals)
+
+    def test_ts_not_toContain_captures_literal(self) -> None:
+        test_code = (
+            "it('hides secret', () => {\n"
+            "  expect(redact('abc123def456')).not.toContain('abc123def456');\n"
+            "});\n"
+        )
+        exp = extract_grader_expectations(
+            [("redact.test.ts", test_code)], language="typescript"
+        )
+        self.assertIn("abc123def456", exp.assertion_not_in_literals)
+
+
+class TestFormatAssertedLiteralsForLLM(unittest.TestCase):
+    def test_returns_empty_when_no_literals(self) -> None:
+        test_code = "def test_smoke():\n    assert redact('x') is not None\n"
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        self.assertEqual(format_asserted_literals_for_llm(exp), "")
+
+    def test_renders_all_three_buckets(self) -> None:
+        test_code = (
+            "def test_many():\n"
+            "    assert '123456789:***' in result\n"
+            "    assert 'abc123def456' not in result\n"
+            "    assert redact('HOME=/home/user') == 'HOME=/home/user'\n"
+        )
+        exp = extract_grader_expectations([("test_x.py", test_code)])
+        text = format_asserted_literals_for_llm(exp)
+        self.assertIn("Must appear", text)
+        self.assertIn("123456789:***", text)
+        self.assertIn("Must NOT appear", text)
+        self.assertIn("abc123def456", text)
+        self.assertIn("Exact equality", text)
+        self.assertIn("HOME=/home/user", text)
+        self.assertIn("direct_contradiction", text)
 
 
 class TestExtractPromptSurface(unittest.TestCase):

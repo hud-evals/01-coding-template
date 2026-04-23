@@ -100,11 +100,12 @@ class SpecRendererTests(unittest.TestCase):
 
             self.assertIn("## Required Tested Symbols", md)
             self.assertIn("def _private_helper(text: str) -> str", md)
-            self.assertIn("Create and edit the solution directly in `/home/ubuntu/workspace`.", md)
-            self.assertIn("Hidden tests import the solution as top-level module file(s): `target.py`.", md)
+            self.assertIn("Create and edit the solution under `/home/ubuntu/workspace`", md)
+            self.assertIn("Workspace-relative paths for hidden-test imports: `agent/target.py`.", md)
             self.assertIn("`pkg.support`", md)
             self.assertIn("No third-party runtime dependencies were detected", md)
-            self.assertIn("├── target.py", md)
+            self.assertIn("agent/", md)
+            self.assertIn("target.py", md)
             self.assertNotIn("__future__", md)
 
     def test_exact_api_preserves_positional_only_and_keyword_only_markers(self) -> None:
@@ -205,7 +206,7 @@ class SpecRendererTests(unittest.TestCase):
             self.assertIn("## Runtime Files", md)
             self.assertIn("### Files already provided", md)
             self.assertIn("`/home/ubuntu/workspace/schema.sql`", md)
-            self.assertIn("├── schema.sql (provided)", md)
+            self.assertIn("schema.sql (provided)", md)
             self.assertNotIn("### Files you must create", md)
 
     def test_prompt_lists_agent_created_asset_separately(self) -> None:
@@ -257,7 +258,7 @@ class SpecRendererTests(unittest.TestCase):
             self.assertIn("## Runtime Files", md)
             self.assertIn("### Files you must create", md)
             self.assertIn("`/home/ubuntu/workspace/config.yaml`", md)
-            self.assertIn("├── config.yaml (you create)", md)
+            self.assertIn("config.yaml (you create)", md)
             self.assertNotIn("### Files already provided", md)
 
     def test_exact_api_includes_private_constants(self) -> None:

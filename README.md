@@ -63,8 +63,8 @@ tasks/my_task/                     # Python
 ├── task.py                        # HUD wiring, grading commands, golden validation
 ├── prompt.md                      # what the agent sees
 ├── tests/                         # hidden pytest files
-├── golden/                        # golden source for validation
-├── support/                       # hidden repo-internal helpers
+├── golden/                        # golden source at repo-relative paths (e.g. golden/agent/retry_utils.py)
+├── support/                       # hidden repo-internal helpers (namespace-package safe)
 └── requirements.hidden.txt        # hidden pip dependencies
 
 tasks/my_ts_task/                  # TypeScript
@@ -89,6 +89,18 @@ Non-Python files referenced by source or tests via `open(...)`, `sqlite3.connect
 Tests that derive paths from `__file__` — `REPO_ROOT = os.path.dirname(os.path.abspath(__file__))` and friends (`HERE`, `BASE_DIR`, `ROOT_DIR`, `PROJECT_ROOT`) — are rewritten at generation time to read `AST_PILOT_REPO_ROOT` (set to `/home/ubuntu/workspace` at grading time). Without this, tests staged at `/tmp/test_x.py` would resolve sibling files against `/tmp` instead of the agent's workspace.
 
 Detection only activates when the source tree has a repo-root marker (`pyproject.toml` or `package.json`); bare directories are skipped. Both behaviors require the tests to be present at scan time — if you copy hidden tests into `tasks/<name>/tests/` after regen, the rewrite and asset detection won't fire.
+
+Inline `Path(__file__).parents[N]` inside function bodies is **not** rewritten — the rewriter only handles module-level anchor assignments (`REPO_ROOT = ...`). Tests that use `Path(__file__).resolve().parents[N]` to reach *sibling* modules (e.g. walking up to grab `gateway/run.py` from a test that lives next to `tools/approval.py`) are detected at generation time and surfaced as a `[warn]` on stderr. At grading time these resolve against `/tmp/` and the referenced files won't exist. Fix by trimming the test to the target module's own surface, or bundle the sibling module into `support/` and set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1` if needed.
+
+### Nested package support
+
+Source files inside a repo-internal package (e.g. `hermes-agent/agent/retry_utils.py`) preserve their nested path end-to-end. The agent is told to create the solution at `agent/retry_utils.py` under the workspace, the golden lives at `golden/agent/retry_utils.py`, and hidden tests keep their original `from agent.retry_utils import …` imports — no flat-basename rewrite.
+
+Packages that contain a workspace target (like `agent/` above) ship without an `__init__.py` under `support/`. Python then treats the package as a PEP 420 namespace package, so the agent's workspace write and any hidden sibling helpers (e.g. `support/agent/other_helper.py`) merge onto one import root at grading time. Single-file scans with the source at the repo root still use the flat workspace layout (no package wrapper).
+
+### Alignment literal checks
+
+The alignment pass extracts every literal in the hidden tests' `assert <LIT> in result`, `assert <LIT> not in result`, and `assert x == <LIT>` assertions (and their TS `toContain` / `toBe` equivalents) and hands them to the reviewer with a required per-literal simulation schema. Any literal that the prompt's rules would not produce verbatim is auto-converted into a blocking `direct_contradiction` fix — the reviewer cannot rationalize these away. Catches drift like "prompt says use `_mask_token()`" vs "test asserts `':***'` in output".
 
 ## Deploy and validate
 

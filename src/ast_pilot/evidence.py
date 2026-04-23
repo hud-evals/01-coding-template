@@ -76,6 +76,13 @@ class ModuleInfo:
     interfaces: list[InterfaceInfo] = field(default_factory=list)
     string_literals: list[str] = field(default_factory=list)
     line_count: int = 0
+    dotted_module_name: str = ""
+    """Repo-aware dotted module name (e.g. ``agent.retry_utils``). Empty
+    when no repo context was available; fall back to ``module_name``."""
+    workspace_rel_path: str = ""
+    """Where the agent must create this file in the workspace, derived
+    from the dotted module name (e.g. ``agent/retry_utils.py``). Empty
+    when no repo context was available; fall back to ``path.name``."""
 
 
 @dataclass
@@ -185,6 +192,8 @@ def _evidence_from_dict(d: dict[str, Any]) -> Evidence:
             constants=[(c[0], c[1]) for c in m.get("constants", [])],
             string_literals=m.get("string_literals", []),
             line_count=m.get("line_count", 0),
+            dotted_module_name=m.get("dotted_module_name", ""),
+            workspace_rel_path=m.get("workspace_rel_path", ""),
         )
         for f in m.get("functions", []):
             mod.functions.append(_func_from_dict(f))

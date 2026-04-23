@@ -26,6 +26,13 @@ class GraderExpectations:
     instantiated_classes: list[str] = field(default_factory=list)
     string_literals: list[str] = field(default_factory=list)
     asserted_values: list[str] = field(default_factory=list)
+    # Literals the tests assert must appear in the agent's output
+    # (e.g. ``assert "123456789:***" in result``).
+    assertion_in_literals: list[str] = field(default_factory=list)
+    # Literals the tests assert must NOT appear in the agent's output.
+    assertion_not_in_literals: list[str] = field(default_factory=list)
+    # Literals the tests assert exact equality against (e.g. ``assert x == "foo"``).
+    assertion_eq_literals: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -353,21 +360,50 @@ def _extract_calls_and_attrs(tree: ast.AST, exp: GraderExpectations) -> None:
                 exp.accessed_attributes.append(parent)
 
 
+_LITERAL_MIN_LEN = 3
+_LITERAL_MAX_LEN = 200
+
+
+def _keep_literal(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not (_LITERAL_MIN_LEN <= len(stripped) <= _LITERAL_MAX_LEN):
+        return False
+    return not stripped.startswith("#")
+
+
 def _extract_string_literals(tree: ast.AST, exp: GraderExpectations) -> None:
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            val = node.value.strip()
-            if 3 <= len(val) <= 200 and not val.startswith("#"):
-                exp.string_literals.append(val)
+        if isinstance(node, ast.Constant) and _keep_literal(node.value):
+            exp.string_literals.append(node.value.strip())
 
 
 def _extract_assertions(tree: ast.AST, exp: GraderExpectations) -> None:
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assert) and node.test:
-            if isinstance(node.test, ast.Compare):
-                for comparator in node.test.comparators:
-                    if isinstance(comparator, ast.Constant):
-                        exp.asserted_values.append(repr(comparator.value))
+        if not (isinstance(node, ast.Assert) and node.test):
+            continue
+        if not isinstance(node.test, ast.Compare):
+            continue
+        if len(node.test.ops) != 1:
+            continue
+        op = node.test.ops[0]
+        left = node.test.left
+        right = node.test.comparators[0]
+
+        left_lit = left.value if isinstance(left, ast.Constant) else None
+        right_lit = right.value if isinstance(right, ast.Constant) else None
+
+        if isinstance(op, (ast.Eq, ast.NotEq)):
+            for side in (left_lit, right_lit):
+                if _keep_literal(side):
+                    exp.asserted_values.append(repr(side))
+                    if isinstance(op, ast.Eq):
+                        exp.assertion_eq_literals.append(side)
+        elif isinstance(op, ast.In) and _keep_literal(left_lit):
+            exp.assertion_in_literals.append(left_lit)
+        elif isinstance(op, ast.NotIn) and _keep_literal(left_lit):
+            exp.assertion_not_in_literals.append(left_lit)
 
 
 def _resolve_call_chain(node: ast.expr) -> str:
@@ -450,8 +486,34 @@ def _extract_ts_expectations(test_files: list[tuple[str, str]]) -> GraderExpecta
             if len(prop) >= 3 and not prop[0].isupper():
                 exp.accessed_attributes.append(prop)
 
+        _extract_ts_assertion_literals(content, exp)
+
     _dedupe(exp)
     return exp
+
+
+_TS_CONTAIN_RE = re.compile(
+    r"""(\.not)?\.toContain\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+_TS_EQUALITY_RE = re.compile(
+    r"""\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+
+
+def _extract_ts_assertion_literals(content: str, exp: GraderExpectations) -> None:
+    for m in _TS_CONTAIN_RE.finditer(content):
+        literal = m.group(2)
+        if not _keep_literal(literal):
+            continue
+        if m.group(1):
+            exp.assertion_not_in_literals.append(literal)
+        else:
+            exp.assertion_in_literals.append(literal)
+
+    for m in _TS_EQUALITY_RE.finditer(content):
+        literal = m.group(1)
+        if _keep_literal(literal):
+            exp.assertion_eq_literals.append(literal)
 
 
 def _dedupe(exp: GraderExpectations) -> None:
@@ -462,3 +524,54 @@ def _dedupe(exp: GraderExpectations) -> None:
     exp.instantiated_classes = sorted(set(exp.instantiated_classes))
     exp.string_literals = sorted(set(exp.string_literals))
     exp.asserted_values = sorted(set(exp.asserted_values))
+    exp.assertion_in_literals = sorted(set(exp.assertion_in_literals))
+    exp.assertion_not_in_literals = sorted(set(exp.assertion_not_in_literals))
+    exp.assertion_eq_literals = sorted(set(exp.assertion_eq_literals))
+
+
+_ASSERTION_LITERAL_CAP = 60
+
+
+def format_asserted_literals_for_llm(exp: GraderExpectations) -> str:
+    """Render asserted test literals into a reviewer-facing section.
+
+    Returns an empty string when the tests assert no notable literals, so the
+    caller can skip the section entirely.
+    """
+    sections: list[str] = []
+
+    def _emit(heading: str, literals: list[str]) -> None:
+        if not literals:
+            return
+        by_len = sorted(literals, key=lambda s: (-len(s), s))[:_ASSERTION_LITERAL_CAP]
+        sections.append(heading)
+        for lit in by_len:
+            sections.append(f"  - {lit!r}")
+        overflow = len(literals) - len(by_len)
+        if overflow > 0:
+            sections.append(f"  (+ {overflow} more omitted)")
+
+    _emit(
+        "Must appear in agent output (assert <literal> in result):",
+        exp.assertion_in_literals,
+    )
+    _emit(
+        "\nMust NOT appear in agent output (assert <literal> not in result):",
+        exp.assertion_not_in_literals,
+    )
+    _emit(
+        "\nExact equality (assert x == <literal>):",
+        exp.assertion_eq_literals,
+    )
+
+    if not sections:
+        return ""
+
+    header = (
+        "ASSERTED TEST LITERALS (cross-check every one against the prompt):\n"
+        "For each literal below, locate the prompt instruction that produces it. "
+        "If the prompt's substitution or formatting rule would emit a DIFFERENT "
+        "literal, that is a direct_contradiction — report it with safe_to_fix=true "
+        "so the instruction can be rewritten to match the asserted literal.\n"
+    )
+    return header + "\n".join(sections)
