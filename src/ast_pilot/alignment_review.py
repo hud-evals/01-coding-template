@@ -22,14 +22,22 @@ from .grader_expectations import (
     format_asserted_literals_for_llm,
 )
 from .llm_client import call_text_llm
+from .tui import ui as _ui
 
 MAX_REVIEW_TOKENS = 32768
 MAX_CONFIRM_TOKENS = 16384
 
 
-def _log(msg: str, *, end: str = "\n") -> None:
-    import sys
-    print(msg, end=end, flush=True)
+def _log(msg: str) -> None:
+    """Emit a pipeline log line through the shared TUI."""
+    stripped = msg.strip()
+    if stripped.startswith("[ALIGNMENT ROLLBACK]"):
+        _ui().warn(stripped.removeprefix("[ALIGNMENT ROLLBACK] "))
+        return
+    if stripped.startswith("[ALIGNMENT FIX"):
+        _ui().success(stripped)
+        return
+    _ui().detail(stripped)
 
 REVIEW_SYSTEM_PROMPT = """\
 You are a strict benchmark contract auditor.
@@ -223,67 +231,68 @@ def review_task_alignment(
 
     if n == 1:
         test_name, test_content = test_files[0]
-        _log(f"  [1/1] Reviewing {test_name}…", end="")
-        per_file = _review_single_test(
-            prompt_md, test_name, test_content, task_py_summary,
-            max_tokens=max_review_tokens,
-            gap_context=gap_context,
-            assertion_context=assertion_context,
-        )
-        _log(f" done{_consume(per_file)} [{_time.monotonic() - t0:.1f}s]")
+        with _ui().live_status(f"[1/1] reviewing {test_name}"):
+            per_file = _review_single_test(
+                prompt_md, test_name, test_content, task_py_summary,
+                max_tokens=max_review_tokens,
+                gap_context=gap_context,
+                assertion_context=assertion_context,
+            )
+        _log(f"  [1/1] {test_name} done{_consume(per_file)} [{_time.monotonic() - t0:.1f}s]")
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         _log(f"  Reviewing {n} test files in parallel…")
         futures = {}
-        with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
-            for test_name, test_content in test_files:
-                fut = pool.submit(
-                    _review_single_test,
-                    prompt_md, test_name, test_content, task_py_summary,
-                    max_tokens=max_review_tokens,
-                    gap_context=gap_context,
-                    assertion_context=assertion_context,
-                )
-                futures[fut] = test_name
+        with _ui().live_status(f"reviewing {n} test files in parallel"):
+            with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
+                for test_name, test_content in test_files:
+                    fut = pool.submit(
+                        _review_single_test,
+                        prompt_md, test_name, test_content, task_py_summary,
+                        max_tokens=max_review_tokens,
+                        gap_context=gap_context,
+                        assertion_context=assertion_context,
+                    )
+                    futures[fut] = test_name
 
-            done_count = 0
-            for fut in as_completed(futures):
-                done_count += 1
-                test_name = futures[fut]
-                per_file = fut.result()
-                _log(f"    [{done_count}/{n}] {test_name}{_consume(per_file)}")
+                done_count = 0
+                for fut in as_completed(futures):
+                    done_count += 1
+                    test_name = futures[fut]
+                    per_file = fut.result()
+                    _log(f"  [{done_count}/{n}] {test_name}{_consume(per_file)}")
 
-        _log(f"  All {n} reviews done [{_time.monotonic() - t0:.1f}s]")
+        _log(f"  all {n} reviews done [{_time.monotonic() - t0:.1f}s]")
 
     forced_issues = _forced_issues_from_failed_checks(raw_literal_checks)
     if forced_issues:
-        _log(f"  Forced issues from failed literal checks: {len(forced_issues)}")
+        _log(f"  forced issues from failed literal checks: {len(forced_issues)}")
 
     if not raw_issues and not forced_issues:
-        _log("  Verdict pass…", end="")
-        verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
-        _log(f" done [{_time.monotonic() - t0:.1f}s total]")
+        with _ui().live_status("verdict pass"):
+            verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
+        _log(f"  verdict pass done [{_time.monotonic() - t0:.1f}s total]")
         return AlignmentReview(**verdict)
 
     if raw_issues:
-        _log(f"  Confirmation pass ({len(raw_issues)} candidate issues)…", end="")
-        confirmed = _confirmation_pass(
-            prompt_md, raw_issues, test_files,
-            max_tokens=max_confirm_tokens,
-        )
-        _log(f" done ({len(confirmed)} confirmed)")
+        with _ui().live_status(f"confirmation pass ({len(raw_issues)} candidate issues)"):
+            confirmed = _confirmation_pass(
+                prompt_md, raw_issues, test_files,
+                max_tokens=max_confirm_tokens,
+            )
+        _log(f"  confirmation pass done ({len(confirmed)} confirmed)")
     else:
         confirmed = []
 
     final_issues = confirmed + forced_issues
 
-    _log("  Verdict pass…", end="")
-    review = _parse_issues(final_issues)
-    verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=final_issues)
+    with _ui().live_status("verdict pass"):
+        review = _parse_issues(final_issues)
+        verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=final_issues)
     review.confidence = verdict.get("confidence", "")
     review.verdict = verdict.get("verdict", "")
-    _log(f" done [{_time.monotonic() - t0:.1f}s total]")
+    _log(f"  verdict pass done [{_time.monotonic() - t0:.1f}s total]")
     return review
 
 

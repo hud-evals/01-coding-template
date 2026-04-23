@@ -484,14 +484,13 @@ def _write_test_files(
             _write(destination, rewritten)
             files.append(test_path.name)
         if cross_module_warnings:
-            print(
-                "[warn] hidden tests reach outside their own directory via "
-                "Path(__file__).parents[N] — auto-skipped at grading time "
-                "(pytest.mark.skip) so they don't block passing scores:",
-                file=sys.stderr,
+            from .tui import ui as _ui
+            _ui().warn(
+                "hidden tests use Path(__file__).parents[N] — auto-skipped at "
+                "grading time (pytest.mark.skip) so they don't block passing scores"
             )
             for warning in cross_module_warnings:
-                print(f"  - {warning}", file=sys.stderr)
+                _ui().detail(warning)
         return files
 
     synthetic_stem = primary_module.replace(".", "_")
@@ -561,6 +560,7 @@ def _generate_task_py(
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
+        "import base64",
         "import os",
         "from pathlib import Path",
         "",
@@ -630,8 +630,13 @@ def _generate_task_py(
         '        return "; ".join(parts) + "; "',
         "",
         f'    def _inject_and_run(test_file: str, workdir: str = "{WORKSPACE_DIR}") -> str:',
-        '        """Build a bash command that writes a test file and runs pytest via uv run."""',
+        '        """Build a bash command that writes a test file and runs pytest via uv run.',
+        "",
+        "        File content is base64-encoded so regex backslash escapes can't be mangled",
+        "        by any intermediate shell or transport layer.",
+        '        """',
         "        content = (TESTS_DIR / test_file).read_text()",
+        '        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")',
         '        runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"',
         f"        stage_support = {stage_support_expr}",
         f"        stage_assets = {stage_assets_expr}",
@@ -640,21 +645,22 @@ def _generate_task_py(
         "        return (",
         '            f"{stage_support}"',
         '            f"{stage_assets}"',
-        '            f"cat > /tmp/{test_file} << \'TESTEOF\'\\n"',
-        '            f"{content}\\n"',
-        '            f"TESTEOF\\n"',
+        "            f\"echo '{encoded}' | base64 -d > /tmp/{test_file}\\n\"",
         f'            f"cd {{workdir}} && {REPO_ROOT_ENV}={{workdir}} PYTHONPATH={{pythonpath}} "',
         '            f"{uv_cmd} /tmp/{test_file} -v"',
         "        )",
         "",
         '    def _golden_setup(source_file: str, dest: str) -> str:',
-        '        """Build a bash command that writes the golden solution to the workspace."""',
+        '        """Build a bash command that writes the golden solution to the workspace.',
+        "",
+        "        Same base64 treatment as _inject_and_run: immune to backslash-escape",
+        "        corruption anywhere in the shell/transport chain.",
+        '        """',
         "        content = (GOLDEN_DIR / source_file).read_text()",
+        '        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")',
         "        return (",
         '            f"mkdir -p {os.path.dirname(dest)}\\n"',
-        '            f"cat > {dest} << \'GOLDENEOF\'\\n"',
-        '            f"{content}\\n"',
-        '            f"GOLDENEOF"',
+        "            f\"echo '{encoded}' | base64 -d > {dest}\"",
         "        )",
         "",
         "    task = Task(",

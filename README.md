@@ -51,7 +51,7 @@ This runs the full pipeline:
 7. Auto-fixes safe mismatches, hard-stops on contradictions
 8. Promotes the result into `tasks/my_task/`
 
-Use `--no-llm` for fast structural smoke tests. Use `--no-alignment-autofix` to skip the alignment pass.
+Use `--no-llm` for fast structural smoke tests. Use `--no-alignment-autofix` to skip the alignment pass. Use `--plain` (or export `AST_PILOT_PLAIN=1`) to disable the rich TUI and emit uncoloured, unboxed output — ideal for CI logs, piping to files, or terminals without Unicode box-drawing support.
 
 If hidden tests depend on repo-internal modules the generator can't carry, generation fails by default. Set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1` to downgrade instead.
 

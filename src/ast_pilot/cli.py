@@ -6,9 +6,11 @@ import argparse
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .shared_utils import pkg_name as _pkg_name, slug as _slug
+from .tui import ui
 
 
 def _resolve_language(args: argparse.Namespace) -> str:
@@ -156,33 +158,79 @@ def cmd_run(args: argparse.Namespace) -> None:
         from .scanner import scan
         from .spec_renderer import render_start_md
 
-    print(f"=== Scanning {len(source_paths)} source files ===")
-    ev = scan(
-        source_paths=source_paths,
-        test_paths=test_paths,
-        project_name=args.name,
-        readme_path=readme,
+    if getattr(args, "plain", False):
+        from .tui import reset_ui
+        console = reset_ui(plain=True)
+    else:
+        console = ui()
+    pipeline_started = time.monotonic()
+    alignment_extras: list[tuple[str, str]] = []
+
+    console.banner(
+        source=", ".join(str(p) for p in source_paths),
+        name=args.name,
+        language=language,
     )
-    print(
-        f"  {ev.total_loc} LOC, {sum(len(m.classes) for m in ev.source_files)} classes, "
-        f"{sum(len(m.functions) for m in ev.source_files)} functions, "
-        f"{len(ev.tests)} tests"
-    )
+
+    with console.phase("scan", icon="⌕") as p:
+        ev = scan(
+            source_paths=source_paths,
+            test_paths=test_paths,
+            project_name=args.name,
+            readme_path=readme,
+        )
+        console.kv([
+            ("loc", str(ev.total_loc)),
+            ("classes", str(sum(len(m.classes) for m in ev.source_files))),
+            ("functions", str(sum(len(m.functions) for m in ev.source_files))),
+            ("tests", str(len(ev.tests))),
+        ])
+        p.set_detail(f"{ev.total_loc} loc · {len(ev.tests)} tests")
 
     ev.save(out_dir / "evidence.json")
 
-    print(f"\n=== Generating prompt.md {'(with LLM)' if use_llm else '(deterministic)'} ===")
-    md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
-    print(f"  {len(md)} chars written")
+    with console.phase("prompt", icon="✎") as p:
+        if use_llm:
+            with console.live_status("generating prompt.md via llm") as status:
+                md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
+        else:
+            md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
+        console.kv([("chars", f"{len(md):,}"), ("mode", "llm" if use_llm else "deterministic")])
+        p.set_detail(f"{len(md):,} chars")
 
-    print("\n=== Validating prompt.md against evidence ===")
     if language == "typescript":
         from .node_validator import validate
     else:
         from .validator import validate
 
-    vr = validate(ev, out_dir / "prompt.md")
-    print(f"  {vr.summary()}")
+    with console.phase("validate", icon="◈") as p:
+        vr = validate(ev, out_dir / "prompt.md")
+        # Paint a picture: what was checked, and the pass/warn/error breakdown.
+        # "clean" means 0 blocking errors — warnings are informational and don't
+        # halt the pipeline. If there are errors and llm is on, we spin up fix
+        # rounds below to try to auto-repair.
+        console.kv([
+            ("errors", str(vr.error_count)),
+            ("warnings", str(vr.warning_count)),
+        ])
+        if vr.issues:
+            console.issues_table([
+                (
+                    "error" if i.severity == "error" else "warn",
+                    f"{i.section} (line {i.line})" if i.line else i.section,
+                    i.message,
+                )
+                for i in vr.issues
+            ])
+        if vr.error_count == 0:
+            if vr.warning_count == 0:
+                p.success("no factual issues")
+                p.set_detail("clean")
+            else:
+                p.success(f"{vr.warning_count} non-blocking warnings")
+                p.set_detail(f"{vr.warning_count} warnings")
+        else:
+            p.set_detail(f"{vr.error_count} errors — entering fix rounds")
 
     max_fix_rounds = 3
     dismissed_keys: set[str] = set()
@@ -191,87 +239,115 @@ def cmd_run(args: argparse.Namespace) -> None:
         if not real_errors or not use_llm:
             break
 
-        print(f"\n=== Fix round {fix_round}/{max_fix_rounds}: fixing {len(real_errors)} errors ===")
-        from .fixer import fix_issues
-        from .validator import ValidationResult
+        with console.phase(f"fix round {fix_round}/{max_fix_rounds}", icon="✎") as p:
+            console.detail(f"fixing {len(real_errors)} error(s)")
+            from .fixer import fix_issues
+            from .validator import ValidationResult
 
-        filtered_vr = ValidationResult(issues=real_errors)
-        _, actions = fix_issues(ev, out_dir / "prompt.md", filtered_vr)
-        for a in actions:
-            status = a.action.upper()
-            if a.action == "fixed":
-                print(f"  [{status}] {a.issue.message}")
-                print(f"    old: {a.old_text[:80]}")
-                print(f"    new: {a.new_text[:80]}")
-            elif a.action == "dismissed":
-                print(f"  [{status}] {a.issue.message}")
-                print(f"    reason: {a.reason}")
-                dismissed_keys.add(f"{a.issue.line}:{a.issue.message[:60]}")
+            filtered_vr = ValidationResult(issues=real_errors)
+            with console.live_status(f"re-writing prompt.md (round {fix_round})"):
+                _, actions = fix_issues(ev, out_dir / "prompt.md", filtered_vr)
+
+            fix_rows: list[tuple[str, str, str]] = []
+            for a in actions:
+                if a.action == "fixed":
+                    snippet_old = a.old_text[:60].replace("\n", " ")
+                    snippet_new = a.new_text[:60].replace("\n", " ")
+                    fix_rows.append((
+                        "fixed",
+                        a.issue.message,
+                        f"{snippet_old!r} → {snippet_new!r}",
+                    ))
+                elif a.action == "dismissed":
+                    fix_rows.append(("dismissed", a.issue.message, a.reason))
+                    dismissed_keys.add(f"{a.issue.line}:{a.issue.message[:60]}")
+                else:
+                    fix_rows.append((a.action.upper(), a.issue.message, a.reason))
+            console.issues_table(fix_rows)
+
+            with console.live_status(f"re-validating (round {fix_round})"):
+                vr = validate(ev, out_dir / "prompt.md")
+            remaining = _undismissed_errors(vr, dismissed_keys)
+            if remaining:
+                p.warn(f"{len(remaining)} error(s) remaining")
+                for i in remaining:
+                    console.detail(i.message)
+                p.set_detail(f"{len(remaining)} still failing")
             else:
-                print(f"  [{status}] {a.issue.message}: {a.reason}")
-
-        print(f"\n=== Re-validating (round {fix_round}) ===")
-        vr = validate(ev, out_dir / "prompt.md")
-        remaining = _undismissed_errors(vr, dismissed_keys)
-        if remaining:
-            print(f"  {len(remaining)} errors remaining")
-            for i in remaining:
-                print(f"    [ERROR] {i.message}")
-        else:
-            print(f"  PASSED (0 errors, {len(dismissed_keys)} dismissed)")
+                p.success(f"passed ({len(dismissed_keys)} dismissed)")
+                p.set_detail("clean")
 
     remaining_errors = _undismissed_errors(vr, dismissed_keys)
     if remaining_errors:
-        print("\nValidation failed: unresolved factual errors remain in prompt.md.")
-        print("Refusing to generate a task bundle until the prompt matches the extracted evidence.")
+        console.error("validation failed — unresolved factual errors remain in prompt.md")
         for issue in remaining_errors:
-            print(f"  [ERROR] {issue.message}")
+            console.detail(issue.message)
         raise SystemExit(2)
 
-    print("\n=== Generating task bundle ===")
     promoted_to: Path | None = None
     try:
-        files = generate_graders(
-            ev,
-            output_dir=out_dir,
-            prompt_md=md,
-            source_paths=source_paths,
-            test_paths=test_paths,
-        )
-        for path in sorted(files):
-            print(f"  {path}")
+        with console.phase("bundle", icon="☰") as p:
+            files = generate_graders(
+                ev,
+                output_dir=out_dir,
+                prompt_md=md,
+                source_paths=source_paths,
+                test_paths=test_paths,
+            )
+            console.file_tree(f"{len(files)} files", sorted(files.keys()))
+            p.set_detail(f"{len(files)} files")
 
         no_alignment = getattr(args, "no_alignment_autofix", False)
         alignment_max = getattr(args, "alignment_max_rounds", 2)
         generated_task_dir = out_dir / "tasks" / _slug(ev.project_name)
 
         if use_llm and not no_alignment and generated_task_dir.is_dir():
-            print("\n=== Running prompt-grader alignment review ===")
-            alignment = _run_alignment_loop(
-                generated_task_dir, ev, max_rounds=alignment_max, use_llm=use_llm,
-            )
-            if alignment.has_blocking:
-                print("\nAlignment check failed: unresolved prompt-grader contradictions.")
-                for issue in alignment.blocking_issues:
-                    print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
-                _print_alignment_verdict(alignment)
-                raise SystemExit(2)
-            elif alignment.is_clean:
-                print("  Alignment: PASSED (no issues)")
-            else:
-                print(f"  Alignment: OK ({len(alignment.issues)} remaining non-blocking issues)")
-            _print_alignment_verdict(alignment)
+            with console.phase("alignment", icon="⚖") as p:
+                alignment = _run_alignment_loop(
+                    generated_task_dir, ev, max_rounds=alignment_max, use_llm=use_llm,
+                )
+                if alignment.has_blocking:
+                    p.error("blocking contradictions")
+                    console.issues_table([
+                        ("blocking", issue.title, issue.rationale)
+                        for issue in alignment.blocking_issues
+                    ])
+                    if alignment.confidence:
+                        alignment_extras.append(("conf", alignment.confidence))
+                    if alignment.verdict:
+                        alignment_extras.append(("note", alignment.verdict))
+                    p.set_detail("blocking")
+                    raise SystemExit(2)
+                elif alignment.is_clean:
+                    p.success("no issues")
+                    p.set_detail("clean")
+                else:
+                    p.success(f"ok · {len(alignment.issues)} non-blocking issues")
+                    p.set_detail(f"{len(alignment.issues)} non-blocking")
+                if alignment.confidence:
+                    alignment_extras.append(("conf", alignment.confidence))
+                if alignment.verdict:
+                    alignment_extras.append(("note", alignment.verdict))
         elif not use_llm:
-            print("\n  (Alignment review skipped — LLM mode disabled)")
+            with console.phase("alignment", icon="⚖") as p:
+                p.mark_skipped("llm disabled")
 
-        promoted_to = _promote_generated_task(out_dir, ev.project_name)
-        if promoted_to is not None:
-            print(f"\nPromoted task package -> {promoted_to}")
-
-        print(f"\n{_bundle_result_message(out_dir, promoted_to, kept_artifacts=bool(args.output))}")
+        with console.phase("promote", icon="⇪") as p:
+            promoted_to = _promote_generated_task(out_dir, ev.project_name)
+            if promoted_to is not None:
+                p.set_detail(str(promoted_to))
+            else:
+                p.mark_skipped("no tasks/ directory")
     finally:
         if cleanup_after_success and promoted_to is not None:
             shutil.rmtree(out_dir, ignore_errors=True)
+
+    total_elapsed = time.monotonic() - pipeline_started
+    console.summary(
+        task_path=str(promoted_to) if promoted_to else str(out_dir),
+        total_elapsed=total_elapsed,
+        extras=alignment_extras,
+    )
 
 
 def _print_alignment_verdict(alignment) -> None:
@@ -391,6 +467,7 @@ def main() -> None:
     p_run.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
     p_run.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
     p_run.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
+    p_run.add_argument("--plain", action="store_true", help="Disable the rich TUI — emit plain, uncoloured text (CI-friendly). Also honoured via AST_PILOT_PLAIN=1.")
     p_run.add_argument("--language", help="Source language (python|typescript). Auto-inferred from file extensions when omitted.")
     p_run.set_defaults(func=cmd_run)
 

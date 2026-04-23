@@ -1,5 +1,6 @@
 """Task: build approval from scratch."""
 
+import base64
 import os
 from pathlib import Path
 
@@ -69,8 +70,13 @@ if not os.environ.get("_HUD_DEV_CHILD"):
         return "; ".join(parts) + "; "
 
     def _inject_and_run(test_file: str, workdir: str = "/home/ubuntu/workspace") -> str:
-        """Build a bash command that writes a test file and runs pytest via uv run."""
+        """Build a bash command that writes a test file and runs pytest via uv run.
+
+        File content is base64-encoded so regex backslash escapes can't be mangled
+        by any intermediate shell or transport layer.
+        """
         content = (TESTS_DIR / test_file).read_text()
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
         runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"
         stage_support = _stage_hidden_support(runtime_support_dir)
         stage_assets = ""
@@ -79,21 +85,22 @@ if not os.environ.get("_HUD_DEV_CHILD"):
         return (
             f"{stage_support}"
             f"{stage_assets}"
-            f"cat > /tmp/{test_file} << 'TESTEOF'\n"
-            f"{content}\n"
-            f"TESTEOF\n"
+            f"echo '{encoded}' | base64 -d > /tmp/{test_file}\n"
             f"cd {workdir} && AST_PILOT_REPO_ROOT={workdir} PYTHONPATH={pythonpath} "
             f"{uv_cmd} /tmp/{test_file} -v"
         )
 
     def _golden_setup(source_file: str, dest: str) -> str:
-        """Build a bash command that writes the golden solution to the workspace."""
+        """Build a bash command that writes the golden solution to the workspace.
+
+        Same base64 treatment as _inject_and_run: immune to backslash-escape
+        corruption anywhere in the shell/transport chain.
+        """
         content = (GOLDEN_DIR / source_file).read_text()
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
         return (
             f"mkdir -p {os.path.dirname(dest)}\n"
-            f"cat > {dest} << 'GOLDENEOF'\n"
-            f"{content}\n"
-            f"GOLDENEOF"
+            f"echo '{encoded}' | base64 -d > {dest}"
         )
 
     task = Task(
