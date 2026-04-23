@@ -151,11 +151,17 @@ def run_alignment_loop(
             return review
 
         prompt_path.write_text(fix_result.updated_prompt, encoding="utf-8")
-        print(f"  [ALIGNMENT FIX round {round_num}] Applied fixes: {', '.join(fix_result.applied_issue_titles)}")
+        from .tui import ui as _ui
+        _ui().success(
+            f"round {round_num} applied {len(fix_result.applied_issue_titles)} fix(es)"
+        )
+        _ui().issues_table([
+            ("fixed", title, "") for title in fix_result.applied_issue_titles
+        ])
 
         vr = _validate_prompt(language, ev, prompt_path)
         if vr.error_count > 0:
-            print("  [ALIGNMENT ROLLBACK] Factual validation failed after fix — reverting prompt")
+            _ui().warn("alignment rollback — factual validation failed, reverting prompt")
             prompt_path.write_text(prompt_md, encoding="utf-8")
             return review
 

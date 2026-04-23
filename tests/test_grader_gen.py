@@ -262,6 +262,24 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("/mcp_server/tasks/target-task/requirements.hidden.txt", generated_command)
             self.assertNotIn(str(root), generated_command)
 
+            # Regression: _inject_and_run + _golden_setup must use base64 so
+            # backslash-escape-heavy payloads (\b, \w, \', etc.) can't be mangled
+            # by any intermediate shell or transport layer. Heredoc-based writes
+            # were corrupting the approval task's regex patterns in production.
+            self.assertIn("import base64", task_py)
+            self.assertIn("base64.b64encode", task_py)
+            self.assertIn("base64 -d", task_py)
+            self.assertNotIn("TESTEOF", task_py)
+            self.assertNotIn("GOLDENEOF", task_py)
+            self.assertIn("base64 -d > /tmp/", generated_command)
+            # The encoded test payload must roundtrip back to the rewritten test
+            import base64 as _b64
+            import re as _re
+            match = _re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > /tmp/", generated_command)
+            self.assertIsNotNone(match, "no base64 payload found in generated command")
+            decoded = _b64.b64decode(match.group(1)).decode("utf-8")
+            self.assertEqual(decoded, rewritten_test)
+
     def test_bundle_handles_common_src_layout_import_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
