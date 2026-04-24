@@ -18,11 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tasks._helpers import (
     golden_validation,
+    golden_workspace_validation,
     load_golden,
+    load_node_project,
     load_prompt,
     load_requirements,
     load_support,
     pytest_grader,
+    vitest_grader,
 )
 
 
@@ -217,6 +220,86 @@ class GoldenValidationTests(unittest.TestCase):
             calls = golden_validation(str(task_dir / "task.py"))
             dumped = [c.model_dump() for c in calls]
             self.assertEqual(json.loads(json.dumps(dumped)), dumped)
+
+
+class VitestGraderTests(unittest.TestCase):
+    def test_inlines_test_content_and_preserves_repo_rel_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            _write_tree(task_dir / "tests", {
+                "test/defu.test.ts": "it('works', () => {})\n",
+            })
+            grader = vitest_grader(
+                "test/defu.test.ts",
+                task_file=str(task_dir / "task.py"),
+                weight=0.5,
+            )
+            self.assertEqual(grader["kind"], "vitest")
+            self.assertEqual(grader["name"], "test/defu.test.ts")
+            self.assertEqual(grader["test_rel"], "test/defu.test.ts")
+            self.assertEqual(grader["script"], "it('works', () => {})\n")
+            self.assertEqual(grader["weight"], 0.5)
+
+
+class LoadNodeProjectTests(unittest.TestCase):
+    def test_returns_none_when_manifest_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            self.assertIsNone(load_node_project(str(task_dir / "task.py")))
+
+    def test_inlines_config_and_support_and_lists_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            (task_dir / "node_bundle_manifest.json").write_text(json.dumps({
+                "slug": "demo",
+                "source_files": {
+                    "src/index.ts": "export const x = 1;",
+                    "src/lib.ts": "export const y = 2;",
+                },
+                "support_files": {"test/fixtures/a.ts": "export const a = 1;"},
+                "config_files": {
+                    "package.json": "{}",
+                    "tsconfig.json": '{"compilerOptions":{}}',
+                },
+            }), encoding="utf-8")
+            got = load_node_project(str(task_dir / "task.py"))
+            assert got is not None
+            self.assertEqual(got["slug"], "demo")
+            self.assertEqual(got["source_files"], ["src/index.ts", "src/lib.ts"])
+            self.assertIn("package.json", got["config_files"])
+            self.assertIn("test/fixtures/a.ts", got["support_files"])
+
+
+class GoldenWorkspaceValidationTests(unittest.TestCase):
+    def test_no_golden_returns_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            self.assertEqual(golden_workspace_validation(str(task_dir / "task.py")), [])
+
+    def test_writes_basenames_flat_into_workspace(self) -> None:
+        """TS tasks: the agent writes basenames to WORKSPACE_DIR; the grader
+        later maps those back to repo-rel positions. So golden pre-staging
+        must write basenames too, not repo-rel trees."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            _write_tree(task_dir / "golden", {
+                "src/index.ts": "export const x = 1;",
+                "src/lib.ts": "export const y = 2;",
+            })
+            calls = golden_workspace_validation(str(task_dir / "task.py"))
+            self.assertEqual(len(calls), 1)
+            cmd = calls[0].arguments["command"]
+            self.assertIn("/home/ubuntu/workspace/index.ts", cmd)
+            self.assertIn("/home/ubuntu/workspace/lib.ts", cmd)
+            # Repo-rel paths must NOT appear on the workspace side — only the
+            # basename flattening keeps the agent prompt shape honest.
+            self.assertNotIn("/home/ubuntu/workspace/src/", cmd)
+            self.assertIn("| base64 -d >", cmd)
 
 
 if __name__ == "__main__":

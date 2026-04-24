@@ -1,4 +1,4 @@
-"""Tests for node_grader_gen: TypeScript task bundle generation."""
+"""Tests for node_grader_gen: TypeScript task bundle generation (v2 shape)."""
 
 from __future__ import annotations
 
@@ -18,24 +18,20 @@ from ast_pilot.evidence import Evidence, ModuleInfo
 from ast_pilot.node_grader_gen import generate_graders
 
 
-def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None = None):
+def _load_generated_task_module(task_dir: Path):
+    # Pre-import tasks._helpers while the real environment is still in place —
+    # exec_module runs under patch.dict(clear=True) which strips os.environ and
+    # would break any lazy import inside the helpers module.
+    import tasks._helpers  # noqa: F401
+
     module_name = "_generated_node_task_under_test"
     task_path = task_dir / "task.py"
-    project_root = Path(__file__).resolve().parents[1]
-
-    class FakeEnvironment:
-        def __init__(self, name: str):
-            self.name = name
-            self.connected = []
-
-        def connect_hub(self, env_name: str) -> None:
-            self.connected.append(env_name)
 
     class FakeTask:
-        def __init__(self, env, scenario: str, args: dict):
-            self.env = env
+        def __init__(self, scenario: str, args: dict, env=None):
             self.scenario = scenario
             self.args = args
+            self.env = env
             self.validation = []
             self.slug = None
 
@@ -43,13 +39,6 @@ def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None 
         def __init__(self, name: str, arguments: dict):
             self.name = name
             self.arguments = arguments
-
-    fake_hud = types.ModuleType("hud")
-    fake_hud.__path__ = []
-    fake_hud.Environment = FakeEnvironment
-
-    fake_hud_eval = types.ModuleType("hud.eval")
-    fake_hud_eval.__path__ = []
 
     fake_hud_eval_task = types.ModuleType("hud.eval.task")
     fake_hud_eval_task.Task = FakeTask
@@ -61,21 +50,18 @@ def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None 
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
 
-    with patch.dict(os.environ, env_vars or {}, clear=True):
+    with patch.dict(os.environ, {}, clear=True):
         with patch.dict(
             sys.modules,
             {
-                "hud": fake_hud,
-                "hud.eval": fake_hud_eval,
                 "hud.eval.task": fake_hud_eval_task,
                 "hud.types": fake_hud_types,
             },
             clear=False,
         ):
-            with patch.object(sys, "path", [str(project_root), *sys.path]):
-                sys.modules.pop(module_name, None)
-                spec.loader.exec_module(module)
-                return module
+            sys.modules.pop(module_name, None)
+            spec.loader.exec_module(module)
+            return module
 
 
 class NodeGraderGenTests(unittest.TestCase):
@@ -143,7 +129,7 @@ class NodeGraderGenTests(unittest.TestCase):
             self.assertEqual(manifest["slug"], "demo")
             self.assertIn("src/lib.ts", manifest["source_files"])
 
-    def test_golden_validation_writes_flat_to_workspace(self) -> None:
+    def test_task_py_uses_v2_scenario_and_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self._make_repo(root)
@@ -151,6 +137,10 @@ class NodeGraderGenTests(unittest.TestCase):
             (root / "src").mkdir()
             src = root / "src" / "lib.ts"
             src.write_text("export const x = 1;\n", encoding="utf-8")
+
+            (root / "tests").mkdir()
+            test = root / "tests" / "lib.test.ts"
+            test.write_text("import { x } from '../src/lib';\n", encoding="utf-8")
 
             ev = Evidence(project_name="demo", language="typescript")
             ev.source_files = [ModuleInfo(path=str(src), module_name="lib")]
@@ -160,36 +150,25 @@ class NodeGraderGenTests(unittest.TestCase):
                 output_dir=root / "output",
                 prompt_md="# demo\n",
                 source_paths=[src],
-                test_paths=[],
+                test_paths=[test],
             )
 
             task_py = files["tasks/demo/task.py"]
-            self.assertIn("/home/ubuntu/workspace/lib.ts", task_py)
-            self.assertNotIn("/home/ubuntu/workspace/src/lib.ts", task_py)
-
-    def test_no_glob_workspace_copy_in_generated_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            self._make_repo(root)
-
-            (root / "src").mkdir()
-            src = root / "src" / "lib.ts"
-            src.write_text("export const x = 1;\n", encoding="utf-8")
-
-            ev = Evidence(project_name="demo", language="typescript")
-            ev.source_files = [ModuleInfo(path=str(src), module_name="lib")]
-
-            files = generate_graders(
-                ev,
-                output_dir=root / "output",
-                prompt_md="# demo\n",
-                source_paths=[src],
-                test_paths=[],
-            )
-
-            task_py = files["tasks/demo/task.py"]
-            self.assertNotIn("*.ts", task_py)
-            self.assertNotIn("*.mts", task_py)
+            self.assertIn('SCENARIO_ID = "ast-pilot:coding-task-v2"', task_py)
+            self.assertIn("from tasks._helpers import (", task_py)
+            self.assertIn("vitest_grader(", task_py)
+            self.assertIn("load_prompt(__file__)", task_py)
+            self.assertIn("load_support(__file__)", task_py)
+            self.assertIn("load_node_project(__file__)", task_py)
+            self.assertIn("golden_workspace_validation(__file__)", task_py)
+            # v1 transport/staging machinery must not leak into v2 task.py.
+            self.assertNotIn("_inject_and_run", task_py)
+            self.assertNotIn("_prepare_hidden_runtime", task_py)
+            self.assertNotIn("_golden_setup", task_py)
+            self.assertNotIn("import base64", task_py)
+            self.assertNotIn("task_bootstrap", task_py)
+            self.assertNotIn("_HUD_DEV_CHILD", task_py)
+            self.assertNotIn("HUD_ENV_NAME", task_py)
 
     def test_bundles_transitive_support_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,15 +257,25 @@ class NodeGraderGenTests(unittest.TestCase):
                 test_paths=[test],
             )
 
-            generated_task_dir = output_dir / "tasks" / "demo"
-            (output_dir / ".env").write_text("HUD_ENV_NAME=test-env\n", encoding="utf-8")
+            # resolve_env_name reads .hud/config.json at the project root
+            # (two levels up from a task dir) — mirror that layout.
+            hud_dir = output_dir / ".hud"
+            hud_dir.mkdir()
+            (hud_dir / "config.json").write_text(
+                json.dumps({"registryName": "demo-env"}), encoding="utf-8"
+            )
 
+            generated_task_dir = output_dir / "tasks" / "demo"
             module = _load_generated_task_module(generated_task_dir)
-            self.assertEqual(module.task.env.name, "test-env")
-            self.assertEqual(module.task.scenario, "ast-pilot:coding-task")
+
+            self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
             self.assertEqual(module.task.slug, "demo")
-            self.assertEqual(len(module.task.args["bash_checks"]), 1)
-            self.assertEqual(module.task.args["bash_checks"][0]["name"], "tests/lib.test.ts")
+            graders = module.task.args["graders"]
+            self.assertEqual(len(graders), 1)
+            self.assertEqual(graders[0]["kind"], "vitest")
+            self.assertEqual(graders[0]["test_rel"], "tests/lib.test.ts")
+            self.assertIsNotNone(module.task.args.get("node_project"))
+            self.assertEqual(module.task.args["node_project"]["slug"], "demo")
 
     def test_duplicate_basenames_both_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

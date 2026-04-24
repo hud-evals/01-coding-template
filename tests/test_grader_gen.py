@@ -26,30 +26,19 @@ from ast_pilot.scanner import scan
 
 
 def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None = None):
-    # Pre-import tasks._helpers before we clear the environment below. Importing
-    # it runs tasks/__init__.py discovery, which eagerly imports every task.py
-    # — those would otherwise fail under a cleared env (RuntimeError from
-    # require_hud_env_name). Doing it here means discovery uses the host env
-    # (where HUD_ENV_NAME is set), and the clear-then-rewrite under patch.dict
-    # still exercises the generated task's .env lookup cleanly.
+    # tasks/__init__.py eagerly discovers and imports every sibling task package.
+    # Pre-import it once here so discovery happens under the host environment,
+    # before the patch.dict(clear=True) below strips os.environ for the test run.
     import tasks._helpers  # noqa: F401
 
     module_name = "_generated_task_under_test"
     task_path = task_dir / "task.py"
 
-    class FakeEnvironment:
-        def __init__(self, name: str):
-            self.name = name
-            self.connected = []
-
-        def connect_hub(self, env_name: str) -> None:
-            self.connected.append(env_name)
-
     class FakeTask:
-        def __init__(self, env, scenario: str, args: dict):
-            self.env = env
+        def __init__(self, scenario: str, args: dict, env=None):
             self.scenario = scenario
             self.args = args
+            self.env = env
             self.validation = []
             self.slug = None
 
@@ -58,27 +47,11 @@ def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None 
             self.name = name
             self.arguments = arguments
 
-    fake_hud = types.ModuleType("hud")
-    fake_hud.__path__ = []
-    fake_hud.Environment = FakeEnvironment
-
-    fake_hud_eval = types.ModuleType("hud.eval")
-    fake_hud_eval.__path__ = []
-
     fake_hud_eval_task = types.ModuleType("hud.eval.task")
     fake_hud_eval_task.Task = FakeTask
 
     fake_hud_types = types.ModuleType("hud.types")
     fake_hud_types.MCPToolCall = FakeMCPToolCall
-
-    repo_root = Path(__file__).resolve().parents[1]
-    task_bootstrap_path = repo_root / "task_bootstrap.py"
-    bootstrap_spec = importlib.util.spec_from_file_location(
-        "task_bootstrap", task_bootstrap_path,
-    )
-    fake_task_bootstrap = importlib.util.module_from_spec(bootstrap_spec)
-    assert bootstrap_spec is not None and bootstrap_spec.loader is not None
-    bootstrap_spec.loader.exec_module(fake_task_bootstrap)
 
     spec = importlib.util.spec_from_file_location(module_name, task_path)
     module = importlib.util.module_from_spec(spec)
@@ -88,11 +61,8 @@ def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None 
         with patch.dict(
             sys.modules,
             {
-                "hud": fake_hud,
-                "hud.eval": fake_hud_eval,
                 "hud.eval.task": fake_hud_eval_task,
                 "hud.types": fake_hud_types,
-                "task_bootstrap": fake_task_bootstrap,
             },
             clear=False,
         ):
@@ -245,9 +215,14 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("load_support(__file__)", task_py)
             self.assertIn("load_requirements(__file__)", task_py)
             self.assertIn("golden_validation(__file__)", task_py)
-            self.assertIn("from task_bootstrap import require_hud_env_name", task_py)
-            self.assertIn("env = Environment(ENV_NAME)", task_py)
             self.assertNotIn("mario-claire", task_py)
+            # Generated task.py looks up its env name from .hud/config.json
+            # via resolve_env_name — no task_bootstrap, no .env file, no
+            # HUD_ENV_NAME environment variable.
+            self.assertIn("Environment(resolve_env_name(__file__))", task_py)
+            self.assertNotIn("connect_hub", task_py)
+            self.assertNotIn("task_bootstrap", task_py)
+            self.assertNotIn("HUD_ENV_NAME", task_py)
             # v1 transport/staging machinery has been removed from the task.py
             # template — it lives in the scenario (env.py) or the helpers module now.
             self.assertNotIn("import base64", task_py)
@@ -260,10 +235,16 @@ class GraderGenTests(unittest.TestCase):
             self.assertNotIn("BUNDLED_HIDDEN_REQUIREMENTS", task_py)
             self.assertEqual(init_py, "")
 
+            # resolve_env_name reads .hud/config.json at parents[2] of the
+            # task file — materialize that so the generated task.py loads.
+            (output_dir / ".hud").mkdir()
+            (output_dir / ".hud" / "config.json").write_text(
+                '{"registryName": "target-env"}', encoding="utf-8"
+            )
+
             generated_task_dir = output_dir / "tasks" / "target-task"
-            (output_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
             module = _load_generated_task_module(generated_task_dir)
-            self.assertEqual(module.task.env.name, "dotenv-env")
+            self.assertEqual(module.task.env.name, "target-env")
             self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
 
             args = module.task.args
@@ -1204,7 +1185,10 @@ class GraderGenTests(unittest.TestCase):
             # golden_validation() walks golden/ at task-import time and emits
             # one base64-inlined bash MCPToolCall — load the module and check
             # the rendered command contains the exact workspace path.
-            (out_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
+            (out_dir / ".hud").mkdir()
+            (out_dir / ".hud" / "config.json").write_text(
+                '{"registryName": "nested-env"}', encoding="utf-8"
+            )
             module = _load_generated_task_module(out_dir / "tasks" / "nested-pkg")
             self.assertEqual(len(module.task.validation), 1)
             command = module.task.validation[0].arguments["command"]
@@ -1310,7 +1294,10 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("tasks/flat-pkg/golden/foo.py", files)
             self.assertNotIn("tasks/flat-pkg/golden/agent/foo.py", files)
             # task.validation stages flat golden at its workspace path.
-            (out_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
+            (out_dir / ".hud").mkdir()
+            (out_dir / ".hud" / "config.json").write_text(
+                '{"registryName": "flat-env"}', encoding="utf-8"
+            )
             module = _load_generated_task_module(out_dir / "tasks" / "flat-pkg")
             self.assertEqual(len(module.task.validation), 1)
             command = module.task.validation[0].arguments["command"]

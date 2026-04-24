@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +23,6 @@ from .repo_support import (
 from .shared_utils import pkg_name as _pkg_name, slug as _slug, write_text as _write
 
 WORKSPACE_DIR = "/home/ubuntu/workspace"
-SUPPORT_ROOT = "/opt/ast_pilot_support"
 SMALL_TEST_SUPPORT_MAX_LINES = 400
 ALLOW_UNSUPPORTED_TEST_REFS_ENV = "AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"
 REPO_ROOT_ENV = "AST_PILOT_REPO_ROOT"
@@ -537,11 +535,8 @@ def _generate_task_py(
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
-        "import os",
-        "from pathlib import Path",
-        "",
+        "from hud import Environment",
         "from hud.eval.task import Task",
-        "from task_bootstrap import require_hud_env_name",
         "",
         "from tasks._helpers import (",
         "    golden_validation,",
@@ -549,37 +544,30 @@ def _generate_task_py(
         "    load_requirements,",
         "    load_support,",
         "    pytest_grader,",
+        "    resolve_env_name,",
         ")",
         "",
-        'if not os.environ.get("_HUD_DEV_CHILD"):',
-        "    from hud import Environment",
+        'SCENARIO_ID = "ast-pilot:coding-task-v2"',
         "",
-        '    SCENARIO_ID = "ast-pilot:coding-task-v2"',
-        "",
-        "    TASK_DIR = Path(__file__).parent",
-        "    ENV_NAME = require_hud_env_name(",
-        '        TASK_DIR.parents[1] / ".env",',
-        '        error_message="HUD_ENV_NAME is required. Set it before running this task.",',
-        "    )",
-        "    env = Environment(ENV_NAME)",
-        "    env.connect_hub(ENV_NAME)",
-        "",
-        "    task = Task(",
-        "        env=env,",
-        "        scenario=SCENARIO_ID,",
-        "        args={",
-        '            "prompt": load_prompt(__file__),',
-        '            "graders": [',
+        "task = Task(",
+        "    env=Environment(resolve_env_name(__file__)),",
+        "    scenario=SCENARIO_ID,",
+        "    args={",
+        '        "prompt": load_prompt(__file__),',
+        '        "graders": [',
     ]
-    lines.extend(grader_lines)
+    # grader_lines is indented one level deeper in the v1 template; dedent
+    # each entry by 4 spaces so it lines up with the new top-level task block.
+    for line in grader_lines:
+        lines.append(line[4:] if line.startswith("    ") else line)
     lines += [
-        "            ],",
-        '            "support": load_support(__file__),',
-        '            "hidden_requirements": load_requirements(__file__),',
-        "        },",
-        "    )",
-        f"    task.slug = {slug!r}",
-        "    task.validation = golden_validation(__file__)",
+        "        ],",
+        '        "support": load_support(__file__),',
+        '        "hidden_requirements": load_requirements(__file__),',
+        "    },",
+        ")",
+        f"task.slug = {slug!r}",
+        "task.validation = golden_validation(__file__)",
         "",
     ]
     return "\n".join(lines)

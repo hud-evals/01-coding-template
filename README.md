@@ -12,7 +12,7 @@ A HUD environment is a Docker image that exposes one or more **scenarios**. A sc
 
 There are two commands that talk to the HUD platform from this repo:
 
-- **`hud deploy .`** builds the Docker image from `Dockerfile.hud`, pushes it to HUD's registry, and registers the scenarios declared in `env.py`. Re-run it whenever **the container-side code** changes: `env.py`, `Dockerfile.hud`, `pyproject.toml`, `task_bootstrap.py`.
+- **`hud deploy .`** builds the Docker image from `Dockerfile.hud`, pushes it to HUD's registry, and registers the scenarios declared in `env.py`. Re-run it whenever **the container-side code** changes: `env.py`, `Dockerfile.hud`, or `pyproject.toml`.
 - **`hud sync tasks`** discovers the `Task` objects defined under `tasks/<name>/task.py` and uploads their JSON payloads (`scenario`, `args`, `validation`) to the platform. Nothing Docker-related happens here — it's a plain HTTP round-trip.
 
 After a task is synced, you invoke it with `hud eval <taskset> <agent> --task-ids <slug>`. Two agents matter for authoring:
@@ -24,18 +24,19 @@ After a task is synced, you invoke it with `hud eval <taskset> <agent> --task-id
 
 ```bash
 uv sync
-cp .env.example .env   # fill in HUD_API_KEY and HUD_ENV_NAME
-source .env
-hud deploy .           # builds the image, pushes it, registers the scenarios
+export HUD_API_KEY=...   # required: platform + LLM inference gateway auth
+hud deploy .             # builds the image, pushes it, registers the scenarios
+                         # .hud/config.json is written here, recording the env name
 ```
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HUD_API_KEY` | required | Auth for HUD platform + LLM inference gateway |
-| `HUD_ENV_NAME` | required | Deployed HUD environment name (also the taskset slug) |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model for the generator's prompt / alignment passes |
 | `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | `1` to downgrade unsupported test imports instead of failing |
 | `CODING_GITHUB_TOKEN` | unset | Build secret for private-repo clones in `Dockerfile.hud` |
+
+The deployed environment name lives in `.hud/config.json` (`registryName`) and is picked up automatically by the generator + sync flow — no `.env` or `HUD_ENV_NAME` export needed.
 
 After the first deploy, you'll see both scenarios registered: `ast-pilot:coding-task-v2` (the one every new task uses) and `ast-pilot:coding-task` (legacy, kept for backward compatibility with image-baked tasks).
 
@@ -49,11 +50,10 @@ from hud import Environment
 from hud.eval.task import Task
 from hud.types import MCPToolCall
 
-env = Environment("mario-claire")
-env.connect_hub("mario-claire")
+from tasks._helpers import resolve_env_name  # reads .hud/config.json at the repo root
 
 task = Task(
-    env=env,
+    env=Environment(resolve_env_name(__file__)),
     scenario="ast-pilot:coding-task-v2",
     args={
         "prompt": "Build a function named add(a, b) that returns a + b...",
@@ -85,8 +85,8 @@ Ship it:
 
 ```bash
 hud sync tasks -y                                               # uploads Task.args + Task.validation
-hud eval "$HUD_ENV_NAME" integration_test --task-ids my-task -y # golden must score 1.0
-hud eval "$HUD_ENV_NAME" claude --task-ids my-task -y --max-steps 30
+hud eval <env-name> integration_test --task-ids my-task -y # golden must score 1.0
+hud eval <env-name> claude --task-ids my-task -y --max-steps 30
 ```
 
 Change any of the args, the prompt, a grader, or the golden-staging command → re-run `hud sync`. No redeploy.
@@ -95,10 +95,9 @@ Change any of the args, the prompt, a grader, or the golden-staging command → 
 
 Container-side edits only:
 
-- `env.py` — scenario body (staging directories, pytest invocation, new scenario args)
-- `Dockerfile.hud` — runtime image (OS packages, node version)
+- `env.py` — scenario body (staging directories, pytest / vitest invocation, new scenario args)
+- `Dockerfile.hud` — runtime image (OS packages, Python / Node versions)
 - `pyproject.toml` — Python runtime dependencies
-- `task_bootstrap.py` — host-side `.env` loading logic
 
 Everything else — task content, helper modules under `tasks/_helpers/`, the `src/ast_pilot/` generator — lives on the host and flows through `hud sync`.
 
@@ -112,7 +111,7 @@ Once `hud deploy` has registered the scenarios (a one-time thing), **every new o
 Then one more command verifies the harness actually works:
 
 ```bash
-hud eval "$HUD_ENV_NAME" integration_test --task-ids my-task -y
+hud eval <env-name> integration_test --task-ids my-task -y
 ```
 
 The `integration_test` agent pre-stages the golden solution (via `Task.validation`), runs every grader, and expects **Reward 1.0**. If it scores lower, your golden doesn't pass your own hidden tests — the task isn't ready. If it scores 1.0, the grading harness is sound and you can run it against real agents the same way (`claude`, `opus`, …).
@@ -126,9 +125,10 @@ That's it. Task iteration is now a pure host-side → HTTP round-trip loop. The 
 | Arg | Type | What the scenario does |
 | --- | --- | --- |
 | `prompt` | `str` | Prepended with workspace instructions and shown to the agent |
-| `graders` | `list[dict]` | Each dict is either `{"kind": "pytest", "test_name", "script", "name", "weight", "timeout"}` — the scenario writes the script to `/tmp/<test_name>` and runs pytest — or `{"kind": "bash", "command", "name", "weight", "timeout"}` for a raw shell check |
+| `graders` | `list[dict]` | Three kinds: `{"kind": "pytest", "test_name", "script", "name", "weight", "timeout"}` runs a Python test under `uv run --with-requirements`; `{"kind": "vitest", "test_rel", "script", "name", "weight", "timeout"}` runs a TS test from the staged node project tree; `{"kind": "bash", "command", "name", "weight", "timeout"}` runs a raw shell check |
 | `support` | `dict[str, str]` | Written verbatim to `/opt/task_support/<path>`; root is appended to `sys.path`. Lives outside the workspace so agent-created packages can't shadow support packages of the same name. |
-| `hidden_requirements` | `str` | Contents of a pip `requirements.txt`; installed once per grading process, memoized by SHA-256. |
+| `hidden_requirements` | `str` | Contents of a pip `requirements.txt`; consumed per-grader by `uv run --with-requirements` — uv caches resolution by content hash, no venv mutation. |
+| `node_project` | `dict` (TS tasks only) | `{"slug", "config_files", "support_files", "source_files"}` — scenario mirrors the repo tree at `/tmp/ast_pilot_ts_stage/<slug>/`, installs `node_modules` into a content-hashed cache once, then per-grader copies agent sources from the workspace and runs `npx vitest run <test_rel>`. |
 
 `Task.validation` on the task object is orthogonal to `args` — it's a list of `MCPToolCall`s that `hud eval integration_test` executes in order before graders run. Perfect for pre-staging a golden solution with a base64-encoded bash write. Verified end-to-end against `hud-python`'s `EvalContext` → `IntegrationTestRunner`.
 
@@ -150,10 +150,10 @@ uv run ast-pilot run path/to/module.py \
 hud sync tasks -y
 
 # 3. Validate — golden must score 1.0
-hud eval "$HUD_ENV_NAME" integration_test --task-ids my-task -y
+hud eval <env-name> integration_test --task-ids my-task -y
 ```
 
-Then run it with a real agent: `hud eval "$HUD_ENV_NAME" claude --task-ids my-task -y --max-steps 30`.
+Then run it with a real agent: `hud eval <env-name> claude --task-ids my-task -y --max-steps 30`.
 
 ### What `ast-pilot run` does
 
@@ -246,18 +246,17 @@ The alignment pass extracts every literal in the hidden tests' `assert <LIT> in 
 01-coding-template/
 ├── src/ast_pilot/       # scanner, renderer, validator, fixer, alignment, task generator
 ├── tasks/               # generated task packages
-│   └── _helpers/        # load_*, pytest_grader, golden_validation — host-side inliners
-├── env.py               # HUD environment + two scenarios
+│   └── _helpers/        # load_*, pytest_grader, vitest_grader, golden_validation — host-side inliners
+├── env.py               # HUD environment + two scenarios (v1 legacy, v2 sync-only)
 ├── cli.py               # MCP server entry point
-├── task_bootstrap.py    # local .env loading for generated tasks
-├── build_support.py     # hidden support staging for the legacy scenario
+├── .hud/config.json     # written by `hud deploy`; records registryName for this env
 ├── Dockerfile.hud       # Ubuntu + Python + Node 20 runtime
 └── pyproject.toml       # hud-python >= 0.5.35
 ```
 
 ## Troubleshooting
 
-**`HUD_ENV_NAME is required`** — Put `HUD_ENV_NAME=<name>` in `.env` and run `source .env`.
+**`Cannot resolve HUD environment` at sync time** — `.hud/config.json` is missing. Run `hud deploy` (or `hud sync env <name>`) once to write it.
 
 **`ModuleNotFoundError` during integration_test** — Usually a missing helper in `support/`, a missing dependency in `requirements.hidden.txt`, or a bad import rewrite. Check the failing import first.
 
@@ -281,7 +280,7 @@ A valid task is not necessarily a solvable task. Good heuristics:
 - Always run real-agent evals after integration_test passes
 
 ```bash
-hud eval "$HUD_ENV_NAME" claude --task-ids my-task -y --max-steps 30
+hud eval <env-name> claude --task-ids my-task -y --max-steps 30
 ```
 
 Run multiple attempts and inspect failures before shipping.
