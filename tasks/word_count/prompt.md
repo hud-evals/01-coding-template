@@ -2,47 +2,27 @@
 
 ## Overview
 
-**word-count** is a lightweight Python utility library designed to provide simple word-counting functionality. The project consists of a single source module (`counter`) containing 17 lines of code organized around two module-level functions. With zero class definitions, the library adopts a functional programming approach, exposing its capabilities through direct function calls rather than object-oriented abstractions. This minimal architecture makes word-count suitable for integration into larger applications or as a standalone utility for basic text analysis tasks.
-
-The `counter` module serves as the sole interface for word-counting operations, as indicated by its docstring: "Simple word-count utility." The module exposes exactly two functions at the module level, each designed to handle specific aspects of word counting. The compact codebase of 17 lines reflects a focused implementation that prioritizes simplicity and efficiency without unnecessary abstraction layers or feature bloat.
-
-This library is intended for developers seeking a straightforward, dependency-light solution for word-counting operations in Python projects. The functional design and minimal footprint make it easy to understand, maintain, and integrate into existing codebases without introducing significant overhead.
+- Project name: word-count
+- Total lines of code: 17
+- Number of source modules: 1
+- Classes: 0
+- Module-level functions: 2
+- Module 'counter' docstring: Simple word-count utility.
 
 ## Natural Language Instructions
 
-### Implementation Constraints
-- Create the file at `/home/ubuntu/workspace/textkit/counter.py`
-- Create the directory `/home/ubuntu/workspace/textkit/` if it does not exist
-- The module must be importable as `from textkit.counter import count_words, unique_words, WHITESPACE`
-- Do not use external dependencies beyond Python's standard library
-- The total implementation should be approximately 17 lines of code
-- Preserve exact function signatures and parameter names as specified
+Before you start:
+- Create and edit the solution under `/home/ubuntu/workspace` at the exact workspace-relative paths below.
+- Workspace-relative paths for hidden-test imports: `textkit/counter.py`.
+- Implement every symbol listed in `Required Tested Symbols`, including underscored/private helpers.
+- Recreate any repo-internal helper behavior locally instead of trying to install private packages.
 
 ### Behavioral Requirements
 
-1. **Module docstring**: The `textkit.counter` module must have the docstring `"Simple word-count utility."`
-
-2. **WHITESPACE constant**: Define a module-level constant named `WHITESPACE` with the exact value `" \t\n\r\f\v"` (space, tab, newline, carriage return, form feed, vertical tab). This constant must be importable and must contain at least the characters space (`" "`), tab (`"\t"`), and newline (`"\n"`).
-
-3. **count_words function signature**: Implement a function with signature `def count_words(text: str) -> int:` that returns an integer.
-
-4. **count_words docstring**: The function must have the docstring `"Return the number of whitespace-delimited tokens in *text*."`
-
-5. **count_words behavior with normal input**: When called with a string containing words separated by whitespace (e.g., `"hello world"`), the function must return the count of whitespace-delimited tokens. For `"hello world"`, it must return `2`.
-
-6. **count_words behavior with empty string**: When called with an empty string `""`, the function must return `0`.
-
-7. **count_words behavior with whitespace-only input**: When called with a string containing only whitespace characters (e.g., `"   \t\n  "`), the function must return `0`.
-
-8. **count_words behavior with None input**: When called with `None` as the argument, the function must return `0` (not raise an exception).
-
-9. **unique_words function signature**: Implement a function with signature `def unique_words(text: str) -> set[str]:` that returns a set of strings.
-
-10. **unique_words docstring**: The function must have the docstring `"Return the set of unique case-folded words in *text*."`
-
-11. **unique_words case-folding behavior**: When called with a string containing the same word in different cases (e.g., `"Hello HELLO hello"`), the function must return a set containing only one element: the case-folded (lowercased) version of the word. For `"Hello HELLO hello"`, it must return `{"hello"}`.
-
-12. **unique_words behavior with empty string**: When called with an empty string `""`, the function must return an empty set `set()`.
+1. Implement the function `count_words(text)`
+   Return the number of whitespace-delimited tokens in *text*.
+2. Implement the function `unique_words(text)`
+   Return the set of unique case-folded words in *text*.
 
 ## Required Tested Symbols
 
@@ -124,32 +104,62 @@ WHITESPACE = " \t\n\r\f\v"
 
 ## Implementation Notes
 
-### Node 1: count_words function behavior
+The following behaviors are validated by the test suite:
 
-The `count_words(text: str) -> int` function returns the number of whitespace-delimited tokens in the input text.
+### Note 1: test_count_words_simple
+Tests symbols: `count_words`
 
-- When given `"hello world"`, returns `2`.
-- When given an empty string `""`, returns `0`.
-- When given only whitespace characters (e.g., `"   \t\n  "`), returns `0`.
-- When given `None` as input, returns `0` (the function handles `None` gracefully rather than raising an exception).
+```python
+def test_count_words_simple() -> None:
+    assert count_words("hello world") == 2
+```
 
-Whitespace delimiters are defined by the `WHITESPACE` constant.
+### Note 2: test_count_words_empty
+Tests symbols: `count_words`
 
-### Node 2: unique_words function behavior
+```python
+def test_count_words_empty() -> None:
+    assert count_words("") == 0
+```
 
-The `unique_words(text: str) -> set[str]` function returns a set of unique case-folded words in the input text.
+### Note 3: test_count_words_whitespace_only
+Tests symbols: `count_words`
 
-- Case-folding is applied: when given `"Hello HELLO hello"`, all three variants are normalized to the same case and the function returns `{"hello"}` (a set containing a single element).
-- When given an empty string `""`, returns an empty set `set()`.
+```python
+def test_count_words_whitespace_only() -> None:
+    assert count_words("   \t\n  ") == 0
+```
 
-### Node 3: WHITESPACE constant definition
+### Note 4: test_count_words_none
+Tests symbols: `count_words`
 
-The `WHITESPACE` constant is defined as `" \t\n\r\f\v"` and contains the following characters:
-- Space: `" "`
-- Tab: `"\t"`
-- Newline: `"\n"`
-- Carriage return: `"\r"`
-- Form feed: `"\f"`
-- Vertical tab: `"\v"`
+```python
+def test_count_words_none() -> None:
+    assert count_words(None) == 0
+```
 
-These characters are used as delimiters for tokenizing text in the `count_words` function.
+### Note 5: test_unique_words_casefolds
+Tests symbols: `unique_words`
+
+```python
+def test_unique_words_casefolds() -> None:
+    assert unique_words("Hello HELLO hello") == {"hello"}
+```
+
+### Note 6: test_unique_words_empty
+Tests symbols: `unique_words`
+
+```python
+def test_unique_words_empty() -> None:
+    assert unique_words("") == set()
+```
+
+### Note 7: test_whitespace_constant_has_expected_chars
+Tests symbols: `WHITESPACE`
+
+```python
+def test_whitespace_constant_has_expected_chars() -> None:
+    assert " " in WHITESPACE
+    assert "\t" in WHITESPACE
+    assert "\n" in WHITESPACE
+```

