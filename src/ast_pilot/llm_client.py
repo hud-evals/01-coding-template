@@ -10,13 +10,23 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Callable
 
 _client = None
 _client_api_key: str | None = None
 
 HUD_GATEWAY_BASE_URL = "https://inference.hud.ai/v1"
 DEFAULT_MODEL = "claude-haiku-4-5"
+
+# When set, call_text_llm streams tokens and pushes each delta to this callback.
+# UI components register themselves here so a tail-preview / token counter can
+# update live during prompt generation without threading a handle through every
+# renderer function.
+llm_stream_sink: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "llm_stream_sink", default=None
+)
 
 
 def call_text_llm(
@@ -39,15 +49,21 @@ def call_text_llm(
         return None
 
     model = os.environ.get("AST_PILOT_MODEL", DEFAULT_MODEL)
+    sink = llm_stream_sink.get()
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = _extract_response_text(response)
+        if sink is None:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = _extract_response_text(response)
+        else:
+            text = _stream_chat_completion(
+                client, model, prompt, max_tokens, temperature, sink
+            )
     except Exception as exc:
         print(f"[warn] LLM call failed: {exc}")
         return None
@@ -63,6 +79,66 @@ def call_text_llm(
             return None
 
     return text
+
+
+def _stream_chat_completion(
+    client,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    sink: Callable[[str], None],
+) -> str | None:
+    """Stream a chat completion and push each token delta to *sink* while
+    accumulating the full text for return.
+
+    The sink is called from the iteration thread; it must not raise. Any
+    exception it raises is swallowed so a TUI glitch can't kill the LLM call.
+    """
+    stream = client.chat.completions.create(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        messages=[{"role": "user", "content": prompt}],
+        stream=True,
+    )
+    chunks: list[str] = []
+    for event in stream:
+        delta = _extract_stream_delta(event)
+        if not delta:
+            continue
+        chunks.append(delta)
+        try:
+            sink(delta)
+        except Exception:
+            pass
+    return "".join(chunks) if chunks else None
+
+
+def _extract_stream_delta(event) -> str | None:
+    """Pull the incremental text out of one streaming chunk.
+
+    OpenAI-compatible schema: ``event.choices[0].delta.content``. We also
+    tolerate dict-shaped events from looser proxies.
+    """
+    choices = getattr(event, "choices", None)
+    if not choices:
+        if isinstance(event, dict):
+            choices = event.get("choices")
+        if not choices:
+            return None
+
+    first = choices[0]
+    delta = getattr(first, "delta", None)
+    if delta is None and isinstance(first, dict):
+        delta = first.get("delta")
+    if delta is None:
+        return None
+
+    content = getattr(delta, "content", None)
+    if content is None and isinstance(delta, dict):
+        content = delta.get("content")
+    return content if isinstance(content, str) else None
 
 
 def _strip_markdown_fences(text: str) -> str:

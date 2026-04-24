@@ -10,7 +10,13 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ast_pilot.llm_client import _get_client, _load_dotenv, call_text_llm, reset_client
+from ast_pilot.llm_client import (
+    _get_client,
+    _load_dotenv,
+    call_text_llm,
+    llm_stream_sink,
+    reset_client,
+)
 
 
 class LlmClientTests(unittest.TestCase):
@@ -151,6 +157,85 @@ class LlmClientTests(unittest.TestCase):
                     self.assertEqual(os.environ["AST_PILOT_MODEL"], "haiku-test")
             finally:
                 os.chdir(previous_cwd)
+
+    def test_streams_chunks_to_sink_when_registered(self) -> None:
+        """With a sink set, call_text_llm takes the streaming path, forwards
+        stream=True to the client, and pushes each delta to the sink while
+        still returning the accumulated text."""
+
+        def make_event(delta_text: str | None) -> MagicMock:
+            event = MagicMock()
+            choice = MagicMock()
+            choice.delta.content = delta_text
+            event.choices = [choice]
+            return event
+
+        events = [make_event("Hello "), make_event("world"), make_event(None)]
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = iter(events)
+
+        chunks: list[str] = []
+        token = llm_stream_sink.set(chunks.append)
+        try:
+            with patch("ast_pilot.llm_client._get_client", return_value=fake_client):
+                result = call_text_llm("test prompt")
+        finally:
+            llm_stream_sink.reset(token)
+
+        self.assertEqual(result, "Hello world")
+        self.assertEqual(chunks, ["Hello ", "world"])
+        call_kwargs = fake_client.chat.completions.create.call_args
+        self.assertTrue(call_kwargs.kwargs.get("stream"))
+
+    def test_streaming_sink_exceptions_do_not_break_the_call(self) -> None:
+        """A glitchy TUI must not take down the LLM call. Sink errors are
+        swallowed and the final text still comes back intact."""
+
+        def make_event(delta_text: str) -> MagicMock:
+            event = MagicMock()
+            choice = MagicMock()
+            choice.delta.content = delta_text
+            event.choices = [choice]
+            return event
+
+        events = [make_event("ok"), make_event("ay")]
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = iter(events)
+
+        def bad_sink(_chunk: str) -> None:
+            raise RuntimeError("ui crashed")
+
+        token = llm_stream_sink.set(bad_sink)
+        try:
+            with patch("ast_pilot.llm_client._get_client", return_value=fake_client):
+                result = call_text_llm("test prompt")
+        finally:
+            llm_stream_sink.reset(token)
+
+        self.assertEqual(result, "okay")
+
+    def test_blocking_path_still_used_without_sink(self) -> None:
+        """Regression guard: with no sink, the old non-streaming API call
+        must be used. Tests and production stay on the blocking path by
+        default, so nothing else has to opt-out."""
+        fake_message = MagicMock()
+        fake_message.content = "blocking result"
+        fake_choice = MagicMock()
+        fake_choice.message = fake_message
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = fake_response
+
+        with patch("ast_pilot.llm_client._get_client", return_value=fake_client):
+            result = call_text_llm("test prompt")
+
+        self.assertEqual(result, "blocking result")
+        call_kwargs = fake_client.chat.completions.create.call_args
+        self.assertNotIn("stream", call_kwargs.kwargs)
 
     def test_get_client_rebuilds_when_api_key_changes(self) -> None:
         fake_openai = types.ModuleType("openai")

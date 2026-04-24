@@ -191,7 +191,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     with console.phase("prompt", icon="✎") as p:
         if use_llm:
-            with console.live_status("generating prompt.md via llm") as status:
+            with console.live_stream("generating prompt.md via llm"):
                 md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
         else:
             md = render_start_md(ev, output_path=out_dir / "prompt.md", use_llm=use_llm)
@@ -245,7 +245,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             from .validator import ValidationResult
 
             filtered_vr = ValidationResult(issues=real_errors)
-            with console.live_status(f"re-writing prompt.md (round {fix_round})"):
+            with console.live_stream(f"re-writing prompt.md (round {fix_round})"):
                 _, actions = fix_issues(ev, out_dir / "prompt.md", filtered_vr)
 
             fix_rows: list[tuple[str, str, str]] = []

@@ -208,6 +208,56 @@ class TestTUI(unittest.TestCase):
         self.assertIn("total: 1.0s", output)
         self.assertIn("conf: high", output)
 
+    def test_live_stream_feeds_chunks_into_state(self) -> None:
+        from ast_pilot.llm_client import llm_stream_sink
+
+        u, _ = _ui_with_buffer()
+        with u.live_stream("generating prompt.md via llm") as stream:
+            sink = llm_stream_sink.get()
+            self.assertIsNotNone(sink, "live_stream should install a stream sink")
+            sink("Hello ")
+            sink("world")
+            self.assertEqual(stream.char_count, 11)
+            self.assertEqual(stream.word_count, 2)
+            self.assertEqual(stream.text, "Hello world")
+
+        # Sink is cleared once the context exits so later LLM calls go back to
+        # the blocking path.
+        self.assertIsNone(llm_stream_sink.get())
+
+    def test_live_stream_plain_mode_still_counts_and_finalises(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from ast_pilot.llm_client import llm_stream_sink
+
+        u = UI(plain=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            with u.live_stream("generating prompt.md via llm") as stream:
+                sink = llm_stream_sink.get()
+                self.assertIsNotNone(sink)
+                sink("one two three")
+                self.assertEqual(stream.char_count, 13)
+                self.assertEqual(stream.word_count, 3)
+
+        output = buf.getvalue()
+        self.assertIn("generating prompt.md via llm", output)
+        self.assertIn("streaming", output)
+        self.assertIn("13 chars", output)
+        # Plain mode must not draw any box / block characters.
+        for ch in ("╭", "╰", "│", "█"):
+            self.assertNotIn(ch, output)
+
+    def test_live_stream_sink_resets_on_exception(self) -> None:
+        from ast_pilot.llm_client import llm_stream_sink
+
+        u, _ = _ui_with_buffer()
+        with self.assertRaises(RuntimeError):
+            with u.live_stream("boom"):
+                raise RuntimeError("kaboom")
+        self.assertIsNone(llm_stream_sink.get())
+
     def test_ui_singleton_is_replaceable(self) -> None:
         original = ui()
         replacement = reset_ui()

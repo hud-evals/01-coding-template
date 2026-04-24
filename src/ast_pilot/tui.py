@@ -31,6 +31,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.segment import Segment
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
@@ -388,6 +389,60 @@ class UI:
         finally:
             progress.stop()
 
+    # ------------------------------------------------------------ live streams
+    @contextlib.contextmanager
+    def live_stream(
+        self, label: str, *, tail_width: int = 64
+    ) -> Iterator[_LiveStream]:
+        """Live LLM streaming display.
+
+        Registers a :data:`llm_client.llm_stream_sink` for the duration of the
+        block, so any ``call_text_llm`` invocations inside automatically stream
+        their tokens through. The display shows a spinner + label + elapsed +
+        char/word counts + scrolling tail preview; it re-renders on Rich's own
+        refresh heartbeat (12fps), so the spinner animates smoothly even when
+        tokens are slow and the first-token wait is visible (not dead air).
+
+        Plain mode prints a one-line start marker, counts chars without
+        rendering, and emits a final "done · N chars · Ns" line on exit.
+        """
+        from .llm_client import llm_stream_sink
+
+        state = _StreamState(label=label)
+
+        if self.plain:
+            self._plain_line("... ", f"{label} [streaming]")
+            handle = _PlainLiveStream()
+            token = llm_stream_sink.set(handle.feed)
+            try:
+                yield handle
+            finally:
+                llm_stream_sink.reset(token)
+                state.ended_at = time.monotonic()
+                elapsed = state.elapsed
+                self._plain_line(
+                    "... ",
+                    f"{label} done · {handle.char_count:,} chars ({elapsed:.1f}s)",
+                )
+            return
+
+        handle = _LiveStream(state)
+        renderable = _StreamRenderable(state, tail_width=tail_width)
+        token = llm_stream_sink.set(handle.feed)
+        live = Live(
+            renderable,
+            console=self.console,
+            refresh_per_second=12,
+            transient=True,
+        )
+        live.start()
+        try:
+            yield handle
+        finally:
+            state.ended_at = time.monotonic()
+            live.stop()
+            llm_stream_sink.reset(token)
+
     # ------------------------------------------------------------------- lists
     def file_tree(self, title: str, files: list[str]) -> None:
         """Render a list of generated file paths as a compact HUD-green tree."""
@@ -644,6 +699,136 @@ class _LiveStatus:
     def set_hint(self, hint: str) -> None:
         """Update the trailing dim hint text (tokens, round counter, etc.)."""
         self._progress.update(self._task_id, hint=hint)
+
+
+@dataclass
+class _StreamState:
+    """Mutable state for a live LLM stream: accumulated text, counters, and
+    the start time used to compute elapsed. Fed one chunk at a time; read by
+    the live renderable on every refresh."""
+
+    label: str
+    text: str = ""
+    char_count: int = 0
+    word_count: int = 0
+    started_at: float = field(default_factory=time.monotonic)
+    ended_at: float | None = None
+
+    def feed(self, chunk: str) -> None:
+        self.text += chunk
+        self.char_count += len(chunk)
+        # Recompute word count from scratch — cheap for prompt-sized text and
+        # handles boundary tokens (partial words arriving across chunks).
+        self.word_count = len(self.text.split())
+
+    @property
+    def elapsed(self) -> float:
+        end = self.ended_at if self.ended_at is not None else time.monotonic()
+        return end - self.started_at
+
+
+class _StreamRenderable:
+    """Rich renderable that re-reads :class:`_StreamState` on every refresh.
+
+    Each tick draws: a green spinner, the phase label, elapsed time, running
+    char + word counts, and a scrolling tail preview of the last ``tail_width``
+    chars of generated text. Passing this directly to ``Live`` (rather than
+    calling ``live.update()`` per token) means the spinner animates smoothly
+    between tokens and the counter updates even during the first-token wait.
+    """
+
+    def __init__(
+        self,
+        state: _StreamState,
+        *,
+        spinner_name: str = "dots12",
+        tail_width: int = 64,
+    ) -> None:
+        self._state = state
+        self._spinner = Spinner(spinner_name, text="", style=HUD_GREEN)
+        self._tail_width = tail_width
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        header = Table.grid(padding=(0, 1))
+        header.add_column(no_wrap=True)
+        header.add_column(no_wrap=True)
+        header.add_column(style=HUD_DIM, no_wrap=True)
+
+        stats = (
+            f"{self._state.elapsed:5.1f}s  ·  "
+            f"{self._state.char_count:,} chars  ·  "
+            f"{self._state.word_count:,} words"
+        )
+        header.add_row(
+            self._spinner,
+            Text(self._state.label, style=f"bold {HUD_GREEN}"),
+            Text(stats, style=HUD_DIM),
+        )
+
+        if self._state.text:
+            tail_raw = self._state.text[-self._tail_width:]
+        else:
+            tail_raw = "(waiting for first token…)"
+        tail_raw = tail_raw.replace("\n", " ↵ ")
+        tail = Text()
+        tail.append("  ▸ ", style=HUD_GREEN_MID)
+        tail.append(tail_raw, style=f"italic {HUD_DIM}")
+
+        yield from console.render(Group(header, tail), options)
+
+
+class _LiveStream:
+    """Handle yielded by :meth:`UI.live_stream`.
+
+    Exposes :meth:`feed` for the LLM client (via the context-var sink) and a
+    read-only view of accumulated state for callers that want to log the final
+    char count after the stream closes.
+    """
+
+    def __init__(self, state: _StreamState) -> None:
+        self._state = state
+
+    def feed(self, chunk: str) -> None:
+        self._state.feed(chunk)
+
+    @property
+    def char_count(self) -> int:
+        return self._state.char_count
+
+    @property
+    def word_count(self) -> int:
+        return self._state.word_count
+
+    @property
+    def text(self) -> str:
+        return self._state.text
+
+
+class _PlainLiveStream:
+    """No-op stream handle for plain mode — same duck-typed surface as
+    :class:`_LiveStream` so call sites don't need to branch."""
+
+    def __init__(self) -> None:
+        self._char_count = 0
+        self._word_count = 0
+
+    def feed(self, chunk: str) -> None:
+        self._char_count += len(chunk)
+        self._word_count += len(chunk.split())
+
+    @property
+    def char_count(self) -> int:
+        return self._char_count
+
+    @property
+    def word_count(self) -> int:
+        return self._word_count
+
+    @property
+    def text(self) -> str:
+        return ""
 
 
 class _PlainLiveStatus:
