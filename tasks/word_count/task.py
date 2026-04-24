@@ -1,4 +1,4 @@
-"""Task: build hermes-retry from scratch."""
+"""Task: build word-count from scratch."""
 
 import os
 from pathlib import Path
@@ -33,11 +33,11 @@ if not os.environ.get("_HUD_DEV_CHILD"):
         args={
             "prompt": load_prompt(__file__),
             "graders": [
-                pytest_grader('test_retry_utils.py', task_file=__file__, weight=1.0),
+                pytest_grader('test_counter.py', task_file=__file__, weight=1.0),
             ],
             "support": load_support(__file__),
             "hidden_requirements": load_requirements(__file__),
         },
     )
-    task.slug = 'hermes-retry'
+    task.slug = 'word-count'
     task.validation = golden_validation(__file__)
