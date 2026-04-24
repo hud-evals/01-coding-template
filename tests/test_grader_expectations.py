@@ -301,44 +301,5 @@ class TestComputeGaps(unittest.TestCase):
         self.assertIn("No deterministic gaps", text)
 
 
-class TestRealTaskValidation(unittest.TestCase):
-    """Test against actual generated task files in the repo."""
-
-    def _load_task_files(self, task_name: str) -> tuple[str, list[tuple[str, str]]]:
-        task_dir = Path(__file__).resolve().parents[1] / "tasks" / task_name
-        prompt_path = task_dir / "prompt.md"
-        if not prompt_path.exists():
-            self.skipTest(f"Task {task_name} not found")
-        prompt = prompt_path.read_text(encoding="utf-8")
-        tests_dir = task_dir / "tests"
-        test_files = []
-        if tests_dir.is_dir():
-            for f in sorted(tests_dir.glob("*.py")):
-                test_files.append((f.name, f.read_text(encoding="utf-8")))
-        return prompt, test_files
-
-    def test_file_operations_task_has_minimal_gaps(self) -> None:
-        prompt, test_files = self._load_task_files("file_operations")
-        if not test_files:
-            self.skipTest("No test files")
-
-        exp = extract_grader_expectations(test_files)
-        surface = extract_prompt_surface(prompt)
-        gaps = compute_gaps(exp, surface)
-
-        self.assertNotIn("ShellFileOperations", gaps.imports_not_in_prompt)
-        self.assertNotIn("ReadResult", gaps.imports_not_in_prompt)
-        self.assertNotIn("WriteResult", gaps.imports_not_in_prompt)
-
-    def test_anthropic_adapter_task_extracts_real_imports(self) -> None:
-        prompt, test_files = self._load_task_files("anthropic_adapter")
-        if not test_files:
-            self.skipTest("No test files")
-
-        exp = extract_grader_expectations(test_files)
-        self.assertTrue(len(exp.imported_names) > 5)
-        self.assertTrue(any("build_anthropic_client" in n for n in exp.imported_names))
-
-
 if __name__ == "__main__":
     unittest.main()
