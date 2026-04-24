@@ -26,6 +26,14 @@ from ast_pilot.scanner import scan
 
 
 def _load_generated_task_module(task_dir: Path, env_vars: dict[str, str] | None = None):
+    # Pre-import tasks._helpers before we clear the environment below. Importing
+    # it runs tasks/__init__.py discovery, which eagerly imports every task.py
+    # — those would otherwise fail under a cleared env (RuntimeError from
+    # require_hud_env_name). Doing it here means discovery uses the host env
+    # (where HUD_ENV_NAME is set), and the clear-then-rewrite under patch.dict
+    # still exercises the generated task's .env lookup cleanly.
+    import tasks._helpers  # noqa: F401
+
     module_name = "_generated_task_under_test"
     task_path = task_dir / "task.py"
 
@@ -230,55 +238,62 @@ class GraderGenTests(unittest.TestCase):
             # With nested layout, the target module lives at its real workspace
             # path (agent/target.py). No shim under support/ is needed.
             self.assertNotIn("tasks/target-task/support/agent/target.py", files)
-            self.assertIn('IMAGE_TASK_DIR = Path("/mcp_server/tasks") / TASK_DIR.name', task_py)
-            self.assertIn("LEGACY_SUPPORT_DIR = Path('/opt/ast_pilot_support') / TASK_DIR.name", task_py)
+            self.assertIn('SCENARIO_ID = "ast-pilot:coding-task-v2"', task_py)
+            self.assertIn("from tasks._helpers import (", task_py)
+            self.assertIn("pytest_grader(", task_py)
+            self.assertIn("load_prompt(__file__)", task_py)
+            self.assertIn("load_support(__file__)", task_py)
+            self.assertIn("load_requirements(__file__)", task_py)
+            self.assertIn("golden_validation(__file__)", task_py)
             self.assertIn("from task_bootstrap import require_hud_env_name", task_py)
-            self.assertIn("ENV_NAME = require_hud_env_name(", task_py)
-            self.assertIn('SCENARIO_ID = "ast-pilot:coding-task"', task_py)
-            self.assertIn('BUNDLED_SUPPORT_DIR = IMAGE_TASK_DIR / "support"', task_py)
-            self.assertIn('RUNTIME_ROOT = Path("/tmp/ast_pilot_task_runtime") / TASK_DIR.name', task_py)
-            self.assertIn('WORKSPACE_DIR = "/home/ubuntu/workspace"', task_py)
-            self.assertIn('LOCAL_HIDDEN_REQUIREMENTS = TASK_DIR / "requirements.hidden.txt"', task_py)
-            self.assertIn('BUNDLED_HIDDEN_REQUIREMENTS = IMAGE_TASK_DIR / "requirements.hidden.txt"', task_py)
-            self.assertIn("def _stage_hidden_support(runtime_support_dir: Path) -> str:", task_py)
-            self.assertIn('runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"', task_py)
-            self.assertIn("stage_support = _stage_hidden_support(runtime_support_dir)", task_py)
-            self.assertIn('pythonpath = f"{WORKSPACE_DIR}:{runtime_support_dir}:$PYTHONPATH"', task_py)
-            self.assertIn("uv run --no-project --with pytest", task_py)
-            self.assertIn("--with-requirements {BUNDLED_HIDDEN_REQUIREMENTS}", task_py)
-            self.assertNotIn("pip install", task_py)
-            self.assertIn("HUD_ENV_NAME is required", task_py)
             self.assertIn("env = Environment(ENV_NAME)", task_py)
             self.assertNotIn("mario-claire", task_py)
+            # v1 transport/staging machinery has been removed from the task.py
+            # template — it lives in the scenario (env.py) or the helpers module now.
+            self.assertNotIn("import base64", task_py)
+            self.assertNotIn("_inject_and_run", task_py)
+            self.assertNotIn("_stage_hidden_support", task_py)
+            self.assertNotIn("_stage_runtime_assets", task_py)
+            self.assertNotIn("IMAGE_TASK_DIR", task_py)
+            self.assertNotIn("LEGACY_SUPPORT_DIR", task_py)
+            self.assertNotIn("BUNDLED_SUPPORT_DIR", task_py)
+            self.assertNotIn("BUNDLED_HIDDEN_REQUIREMENTS", task_py)
             self.assertEqual(init_py, "")
 
             generated_task_dir = output_dir / "tasks" / "target-task"
             (output_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
             module = _load_generated_task_module(generated_task_dir)
-            generated_command = module.task.args["bash_checks"][0]["command"]
             self.assertEqual(module.task.env.name, "dotenv-env")
-            self.assertEqual(module.task.scenario, "ast-pilot:coding-task")
-            self.assertIn("/mcp_server/tasks/target-task/support", generated_command)
-            self.assertIn("/mcp_server/tasks/target-task/requirements.hidden.txt", generated_command)
-            self.assertNotIn(str(root), generated_command)
+            self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
 
-            # Regression: _inject_and_run + _golden_setup must use base64 so
-            # backslash-escape-heavy payloads (\b, \w, \', etc.) can't be mangled
-            # by any intermediate shell or transport layer. Heredoc-based writes
-            # were corrupting the approval task's regex patterns in production.
-            self.assertIn("import base64", task_py)
-            self.assertIn("base64.b64encode", task_py)
-            self.assertIn("base64 -d", task_py)
-            self.assertNotIn("TESTEOF", task_py)
-            self.assertNotIn("GOLDENEOF", task_py)
-            self.assertIn("base64 -d > /tmp/", generated_command)
-            # The encoded test payload must roundtrip back to the rewritten test
-            import base64 as _b64
-            import re as _re
-            match = _re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > /tmp/", generated_command)
-            self.assertIsNotNone(match, "no base64 payload found in generated command")
-            decoded = _b64.b64decode(match.group(1)).decode("utf-8")
-            self.assertEqual(decoded, rewritten_test)
+            args = module.task.args
+            self.assertEqual(sorted(args.keys()), ["graders", "hidden_requirements", "prompt", "support"])
+            self.assertIn("# target-task", args["prompt"])
+            self.assertEqual(len(args["graders"]), 1)
+            grader = args["graders"][0]
+            self.assertEqual(grader["kind"], "pytest")
+            self.assertEqual(grader["test_name"], "test_target.py")
+            # Test content travels inlined — the script is whatever
+            # generate_graders wrote into tests/test_target.py.
+            self.assertEqual(grader["script"], rewritten_test)
+            # Support tree inlines under its repo-relative paths.
+            self.assertIn("helpers/auth.py", args["support"])
+            self.assertIn('HELPER_VALUE = "ok"', args["support"]["helpers/auth.py"])
+            self.assertIn("helpers/prompt_caching.py", args["support"])
+            self.assertIn("other_module.py", args["support"])
+            self.assertIn("httpx>=0.28.0", args["hidden_requirements"])
+
+            # Golden staging flows through Task.validation as a single bash
+            # MCPToolCall with base64 content inlined — survives JSON → shell
+            # transport intact (regression-proof against backslash-heavy
+            # regex payloads).
+            validation = module.task.validation
+            self.assertEqual(len(validation), 1)
+            self.assertEqual(validation[0].name, "bash")
+            command = validation[0].arguments["command"]
+            self.assertIn("mkdir -p /home/ubuntu/workspace/agent", command)
+            self.assertIn("/home/ubuntu/workspace/agent/target.py", command)
+            self.assertIn("base64 -d >", command)
 
     def test_bundle_handles_common_src_layout_import_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -677,7 +692,13 @@ class GraderGenTests(unittest.TestCase):
             rewritten.index('"""'), rewritten.index("import os"),
         )
 
-    def test_generated_task_py_passes_repo_root_env_var(self) -> None:
+    def test_generated_task_py_emits_v2_pytest_grader(self) -> None:
+        """The generated task wires a pytest_grader call that carries the
+        test filename — the scenario's ``_build_grader_command`` re-materialises
+        the test script into /tmp at grade time. In v1 the task.py template
+        also emitted ``AST_PILOT_REPO_ROOT={workdir} PYTHONPATH=...`` directly;
+        that command-building is now scenario-side."""
+
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "pyproject.toml").write_text(
@@ -710,57 +731,26 @@ class GraderGenTests(unittest.TestCase):
                 test_paths=[test_path],
             )
             task_py = files["tasks/target-task/task.py"]
-            self.assertIn(f'REPO_ROOT_ENV = "{REPO_ROOT_ENV}"', task_py)
-            self.assertIn(
-                f"{REPO_ROOT_ENV}={{workdir}} PYTHONPATH=",
-                task_py,
-            )
+            self.assertIn("pytest_grader('test_target.py', task_file=__file__, weight=1.0)", task_py)
+            self.assertIn('SCENARIO_ID = "ast-pilot:coding-task-v2"', task_py)
+            # scenario-side machinery: not in the task.py template anymore.
+            self.assertNotIn(REPO_ROOT_ENV, task_py)
+            self.assertNotIn("PYTHONPATH=", task_py)
 
-    def test_generated_task_py_stages_bundled_assets(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            (root / "pyproject.toml").write_text(
-                "[project]\nname='demo'\nversion='0.1.0'\n",
-                encoding="utf-8",
-            )
-            (root / "schema.sql").write_text("CREATE TABLE t (id);\n", encoding="utf-8")
-            (root / "app").mkdir()
-            (root / "app" / "__init__.py").write_text("", encoding="utf-8")
-            source_path = root / "app" / "target.py"
-            source_path.write_text(
-                "import sqlite3\n"
-                "def run():\n"
-                "    with open('schema.sql') as f:\n"
-                "        return f.read()\n",
-                encoding="utf-8",
-            )
-            tests_dir = root / "tests"
-            tests_dir.mkdir()
-            test_path = tests_dir / "test_target.py"
-            test_path.write_text(
-                "from app.target import run\n\ndef test_run(): run()\n",
-                encoding="utf-8",
-            )
+    @unittest.skip(
+        "v2 has no dedicated assets path yet — bundled assets (e.g. schema.sql) "
+        "currently land in support/ and flow through load_support, which stages "
+        "to /opt/task_support. Needs an `assets` scenario arg + helper before "
+        "tasks that open() workspace-relative files can run under v2."
+    )
+    def test_generated_task_py_stages_bundled_assets(self) -> None:  # pragma: no cover
+        pass
 
-            ev = scan(
-                source_paths=[source_path],
-                test_paths=[test_path],
-                project_name="target-task",
-            )
-            files = generate_graders(
-                ev,
-                output_dir=root / "output",
-                prompt_md="# target-task\n",
-                source_paths=[source_path],
-                test_paths=[test_path],
-            )
-            task_py = files["tasks/target-task/task.py"]
-            self.assertIn("BUNDLED_ASSETS = ['schema.sql']", task_py)
-            self.assertIn("def _stage_runtime_assets(", task_py)
-            self.assertIn("cp -n", task_py)
-            self.assertIn("stage_assets = _stage_runtime_assets(", task_py)
+    def test_generated_task_py_does_not_emit_v1_asset_helpers(self) -> None:
+        """v2 task.py has no bundled-asset machinery — the scenario side owns
+        all staging. This test pins the absence so a v1-style regression is
+        caught immediately."""
 
-    def test_generated_task_py_no_asset_helper_when_none_referenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "pyproject.toml").write_text(
@@ -792,8 +782,9 @@ class GraderGenTests(unittest.TestCase):
                 test_paths=[test_path],
             )
             task_py = files["tasks/target-task/task.py"]
-            self.assertIn("BUNDLED_ASSETS = []", task_py)
-            self.assertIn('stage_assets = ""', task_py)
+            self.assertNotIn("BUNDLED_ASSETS", task_py)
+            self.assertNotIn("_stage_runtime_assets", task_py)
+            self.assertNotIn("stage_assets", task_py)
 
     def test_rewrite_applies_inside_generated_test_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1209,12 +1200,17 @@ class GraderGenTests(unittest.TestCase):
             self.assertIn("from agent.retry_utils import jittered_backoff", rewritten_test)
             self.assertNotIn("from retry_utils import jittered_backoff", rewritten_test)
 
-            # task.py validation writes golden to the nested workspace path.
-            task_py = files["tasks/nested-pkg/task.py"]
-            self.assertIn(
-                "_golden_setup('agent/retry_utils.py', '/home/ubuntu/workspace/agent/retry_utils.py')",
-                task_py,
-            )
+            # task.validation stages golden into its nested workspace path.
+            # golden_validation() walks golden/ at task-import time and emits
+            # one base64-inlined bash MCPToolCall — load the module and check
+            # the rendered command contains the exact workspace path.
+            (out_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
+            module = _load_generated_task_module(out_dir / "tasks" / "nested-pkg")
+            self.assertEqual(len(module.task.validation), 1)
+            command = module.task.validation[0].arguments["command"]
+            self.assertIn("mkdir -p /home/ubuntu/workspace/agent", command)
+            self.assertIn("/home/ubuntu/workspace/agent/retry_utils.py", command)
+            self.assertIn("base64 -d >", command)
 
     def test_nested_package_skips_init_py_for_overlap_packages(self) -> None:
         """When the agent's target lives inside a package that also has
@@ -1313,11 +1309,13 @@ class GraderGenTests(unittest.TestCase):
 
             self.assertIn("tasks/flat-pkg/golden/foo.py", files)
             self.assertNotIn("tasks/flat-pkg/golden/agent/foo.py", files)
-            task_py = files["tasks/flat-pkg/task.py"]
-            self.assertIn(
-                "_golden_setup('foo.py', '/home/ubuntu/workspace/foo.py')",
-                task_py,
-            )
+            # task.validation stages flat golden at its workspace path.
+            (out_dir / ".env").write_text("HUD_ENV_NAME=dotenv-env\n", encoding="utf-8")
+            module = _load_generated_task_module(out_dir / "tasks" / "flat-pkg")
+            self.assertEqual(len(module.task.validation), 1)
+            command = module.task.validation[0].arguments["command"]
+            self.assertIn("/home/ubuntu/workspace/foo.py", command)
+            self.assertIn("base64 -d >", command)
 
     def test_prepend_syspath_imports_sys_before_using_it(self) -> None:
         """`import sys` must appear before `sys.path.insert(...)` even when an

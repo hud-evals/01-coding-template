@@ -510,68 +510,51 @@ def _generate_task_py(
     has_hidden_requirements: bool = False,
     bundled_asset_paths: tuple[str, ...] = (),
 ) -> str:
+    """Emit a task.py that inlines all artifacts into ``Task.args``.
+
+    The generated task calls helpers from :mod:`tasks._helpers` to read
+    prompt/support/tests/requirements at task-import time and embed them
+    into ``Task.args``; ``golden`` pre-staging flows through
+    ``Task.validation`` as a single bash :class:`MCPToolCall` with base64
+    content inlined. ``hud sync`` ships everything — no image rebuild is
+    needed for task-side changes.
+
+    The ``support_enabled``, ``bundled_asset_paths`` and
+    ``has_hidden_requirements`` params are kept for call-site compatibility;
+    the v2 template discovers those dirs/files directly at task-import time
+    via the helpers, so it does not need to branch on them at generation.
+    """
+    del golden_files, support_enabled, bundled_asset_paths, has_hidden_requirements  # inferred at runtime
+
     weight_per_check = round(1.0 / max(len(test_files), 1), 4)
 
-    checks_items = []
+    grader_lines: list[str] = []
     for test_file in test_files:
-        checks_items.append(
-            "                {\n"
-            f"                    \"name\": {repr(Path(test_file).stem)},\n"
-            f"                    \"command\": _inject_and_run({repr(test_file)}),\n"
-            f"                    \"weight\": {weight_per_check},\n"
-            "                },"
+        grader_lines.append(
+            f"                pytest_grader({test_file!r}, task_file=__file__, weight={weight_per_check}),"
         )
-
-    validation_items = []
-    for golden_file in golden_files:
-        destination = f"{WORKSPACE_DIR}/{golden_file}"
-        validation_items.append(
-            "        MCPToolCall(\n"
-            "            name=\"bash\",\n"
-            "            arguments={\n"
-            f"                \"command\": _golden_setup({repr(golden_file)}, {repr(destination)}),\n"
-            "            },\n"
-            "        ),"
-        )
-
-    if support_enabled:
-        pythonpath_expr = 'f"{WORKSPACE_DIR}:{runtime_support_dir}:$PYTHONPATH"'
-        stage_support_expr = "_stage_hidden_support(runtime_support_dir)"
-    else:
-        pythonpath_expr = repr(f"{WORKSPACE_DIR}:$PYTHONPATH")
-        stage_support_expr = '""'
-
-    assets_source_expr = "runtime_support_dir" if support_enabled else "_support_source_dir()"
-    stage_assets_expr = (
-        f"_stage_runtime_assets({assets_source_expr})"
-        if bundled_asset_paths
-        else '""'
-    )
-
-    if has_hidden_requirements:
-        uv_cmd_expr = (
-            '"uv run --no-project --with pytest "'
-            ' f"--with-requirements {BUNDLED_HIDDEN_REQUIREMENTS} "'
-            ' "python -m pytest"'
-        )
-    else:
-        uv_cmd_expr = '"uv run --no-project --with pytest python -m pytest"'
 
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
-        "import base64",
         "import os",
         "from pathlib import Path",
         "",
         "from hud.eval.task import Task",
-        "from hud.types import MCPToolCall",
         "from task_bootstrap import require_hud_env_name",
+        "",
+        "from tasks._helpers import (",
+        "    golden_validation,",
+        "    load_prompt,",
+        "    load_requirements,",
+        "    load_support,",
+        "    pytest_grader,",
+        ")",
         "",
         'if not os.environ.get("_HUD_DEV_CHILD"):',
         "    from hud import Environment",
         "",
-        '    SCENARIO_ID = "ast-pilot:coding-task"',
+        '    SCENARIO_ID = "ast-pilot:coding-task-v2"',
         "",
         "    TASK_DIR = Path(__file__).parent",
         "    ENV_NAME = require_hud_env_name(",
@@ -581,107 +564,22 @@ def _generate_task_py(
         "    env = Environment(ENV_NAME)",
         "    env.connect_hub(ENV_NAME)",
         "",
-        f'    WORKSPACE_DIR = "{WORKSPACE_DIR}"',
-        f'    REPO_ROOT_ENV = "{REPO_ROOT_ENV}"',
-        "",
-        '    TESTS_DIR = TASK_DIR / "tests"',
-        '    GOLDEN_DIR = TASK_DIR / "golden"',
-        '    IMAGE_TASK_DIR = Path("/mcp_server/tasks") / TASK_DIR.name',
-        f"    LEGACY_SUPPORT_DIR = Path({repr(SUPPORT_ROOT)}) / TASK_DIR.name",
-        '    BUNDLED_SUPPORT_DIR = IMAGE_TASK_DIR / "support"',
-        '    RUNTIME_ROOT = Path("/tmp/ast_pilot_task_runtime") / TASK_DIR.name',
-        '    LOCAL_HIDDEN_REQUIREMENTS = TASK_DIR / "requirements.hidden.txt"',
-        '    BUNDLED_HIDDEN_REQUIREMENTS = IMAGE_TASK_DIR / "requirements.hidden.txt"',
-        f"    BUNDLED_ASSETS = {list(bundled_asset_paths)!r}",
-        "",
-        "    def _support_source_dir() -> Path | None:",
-        "        if LEGACY_SUPPORT_DIR.is_dir():",
-        "            return LEGACY_SUPPORT_DIR",
-        "        return BUNDLED_SUPPORT_DIR",
-        "",
-        "    def _stage_hidden_support(runtime_support_dir: Path) -> str:",
-        '        """Copy hidden support modules into a writable runtime directory."""',
-        "        support_source = _support_source_dir()",
-        "        return (",
-        '            "python - <<\'PY\'\\n"',
-        '            "from pathlib import Path\\n"',
-        '            "import shutil\\n"',
-        '            f"support_source = Path({str(support_source)!r})\\n"',
-        '            f"runtime_support_dir = Path({str(runtime_support_dir)!r})\\n"',
-        '            "if support_source.is_dir():\\n"',
-        '            "    if runtime_support_dir.exists():\\n"',
-        '            "        shutil.rmtree(runtime_support_dir)\\n"',
-        '            "    runtime_support_dir.parent.mkdir(parents=True, exist_ok=True)\\n"',
-        '            "    shutil.copytree(support_source, runtime_support_dir)\\n"',
-        '            "PY\\n"',
-        "        )",
-        "",
-        "    def _stage_runtime_assets(source_dir: Path | None) -> str:",
-        '        """Copy bundled non-code assets into the workspace (no-clobber)."""',
-        "        if not BUNDLED_ASSETS or source_dir is None:",
-        '            return ""',
-        "        parts: list[str] = []",
-        "        for rel in BUNDLED_ASSETS:",
-        '            src = f"{source_dir}/{rel}"',
-        '            dst = f"{WORKSPACE_DIR}/{rel}"',
-        '            dst_dir = os.path.dirname(dst) or "/"',
-        "            parts.append(f\"mkdir -p '{dst_dir}'\")",
-        "            parts.append(f\"cp -n '{src}' '{dst}' 2>/dev/null || true\")",
-        '        return "; ".join(parts) + "; "',
-        "",
-        f'    def _inject_and_run(test_file: str, workdir: str = "{WORKSPACE_DIR}") -> str:',
-        '        """Build a bash command that writes a test file and runs pytest via uv run.',
-        "",
-        "        File content is base64-encoded so regex backslash escapes can't be mangled",
-        "        by any intermediate shell or transport layer.",
-        '        """',
-        "        content = (TESTS_DIR / test_file).read_text()",
-        '        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")',
-        '        runtime_support_dir = RUNTIME_ROOT / Path(test_file).stem / "support"',
-        f"        stage_support = {stage_support_expr}",
-        f"        stage_assets = {stage_assets_expr}",
-        f"        pythonpath = {pythonpath_expr}",
-        f"        uv_cmd = {uv_cmd_expr}",
-        "        return (",
-        '            f"{stage_support}"',
-        '            f"{stage_assets}"',
-        "            f\"echo '{encoded}' | base64 -d > /tmp/{test_file}\\n\"",
-        f'            f"cd {{workdir}} && {REPO_ROOT_ENV}={{workdir}} PYTHONPATH={{pythonpath}} "',
-        '            f"{uv_cmd} /tmp/{test_file} -v"',
-        "        )",
-        "",
-        '    def _golden_setup(source_file: str, dest: str) -> str:',
-        '        """Build a bash command that writes the golden solution to the workspace.',
-        "",
-        "        Same base64 treatment as _inject_and_run: immune to backslash-escape",
-        "        corruption anywhere in the shell/transport chain.",
-        '        """',
-        "        content = (GOLDEN_DIR / source_file).read_text()",
-        '        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")',
-        "        return (",
-        '            f"mkdir -p {os.path.dirname(dest)}\\n"',
-        "            f\"echo '{encoded}' | base64 -d > {dest}\"",
-        "        )",
-        "",
         "    task = Task(",
         "        env=env,",
         "        scenario=SCENARIO_ID,",
         "        args={",
-        '            "prompt": (TASK_DIR / "prompt.md").read_text(),',
-        '            "bash_checks": [',
+        '            "prompt": load_prompt(__file__),',
+        '            "graders": [',
     ]
-    lines.extend(checks_items)
+    lines.extend(grader_lines)
     lines += [
         "            ],",
+        '            "support": load_support(__file__),',
+        '            "hidden_requirements": load_requirements(__file__),',
         "        },",
         "    )",
-        f"    task.slug = {repr(slug)}",
-        "",
-        "    task.validation = [",
-    ]
-    lines.extend(validation_items)
-    lines += [
-        "    ]",
+        f"    task.slug = {slug!r}",
+        "    task.validation = golden_validation(__file__)",
         "",
     ]
     return "\n".join(lines)
