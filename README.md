@@ -235,8 +235,8 @@ The alignment pass extracts every literal in the hidden tests' `assert <LIT> in 
 
 ### TypeScript support
 
-**Supported:** `.ts` source, single-package repos (npm/pnpm/yarn), vitest.
-**Not supported yet:** `.js` input, Jest, `node:test`, monorepo workspaces, tsconfig path aliases, React/TSX/browser stacks. The TS generator currently emits the legacy `ast-pilot:coding-task` template — v2 sync-only parity is on the roadmap.
+**Supported:** `.ts` source, single-package repos (npm/pnpm/yarn), vitest. The TS generator emits v2 sync-only `task.py` files, same as the Python generator — `hud sync` ships them with no image rebuild.
+**Not supported yet:** `.js` input, Jest, `node:test`, monorepo workspaces, tsconfig path aliases, React/TSX/browser stacks.
 
 ---
 
