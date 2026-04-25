@@ -8,15 +8,12 @@ bundles transitive local dependencies of hidden tests, and runs
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .evidence import Evidence
-from .node_bundle import NodeBundleManifest, audit_bare_imports, build_manifest
+from .node_bundle import audit_bare_imports, build_manifest
 from .node_repo_support import detect_node_project
 from .shared_utils import slug as _slug, write_text as _write
-
-WORKSPACE_DIR = "/home/ubuntu/workspace"
 
 
 def generate_graders(
@@ -133,173 +130,58 @@ def _generate_task_py(
     test_files: list[str],
     golden_files: list[str],
 ) -> str:
-    """Generate the task.py content for a TypeScript task."""
+    """Generate the task.py content for a TypeScript task (v2, sync-only shape).
+
+    Mirrors the Python generator: tests/config/support/manifest live on disk
+    under the task dir and are read at import time by helpers in
+    ``tasks/_helpers/``. The scenario (``ast-pilot:coding-task-v2``) stages
+    them at grade time so adding a new TS task is a single ``hud sync`` —
+    no image rebuild.
+    """
+
+    del golden_files  # golden staging is driven by helpers.golden_workspace_validation
 
     weight_per_check = round(1.0 / max(len(test_files), 1), 4)
 
-    checks_items = []
-    for test_file in test_files:
-        checks_items.append(
-            f'            {{"name": {test_file!r}, "command": _inject_and_run({test_file!r}), "weight": {weight_per_check}}},'
-        )
-
-    validation_items = []
-    for golden_file in golden_files:
-        basename = Path(golden_file).name
-        dest = f"{WORKSPACE_DIR}/{basename}"
-        validation_items.append(
-            f'        MCPToolCall(name="bash", arguments={{"command": _golden_setup({golden_file!r}, {dest!r})}}),',
-        )
+    grader_lines = [
+        f"                vitest_grader({rel!r}, task_file=__file__, weight={weight_per_check}),"
+        for rel in test_files
+    ]
 
     lines = [
-        '"""HUD task definition for TypeScript project."""',
+        f'"""Task: build {ev.project_name} (TypeScript) from scratch."""',
         "",
-        "import base64",
-        "import json",
-        "import os",
-        "from pathlib import Path",
-        "",
+        "from hud import Environment",
         "from hud.eval.task import Task",
-        "from hud.types import MCPToolCall",
         "",
-        "if not os.environ.get('_HUD_DEV_CHILD'):",
-        "    from hud import Environment",
+        "from tasks._helpers import (",
+        "    golden_workspace_validation,",
+        "    load_node_project,",
+        "    load_prompt,",
+        "    load_support,",
+        "    resolve_env_name,",
+        "    vitest_grader,",
+        ")",
         "",
-        '    SCENARIO_ID = "ast-pilot:coding-task"',
-        "    TASK_DIR = Path(__file__).parent",
-        '    IMAGE_TASK_DIR = Path("/mcp_server/tasks") / TASK_DIR.name',
+        'SCENARIO_ID = "ast-pilot:coding-task-v2"',
         "",
-        "    from task_bootstrap import require_hud_env_name",
-        "",
-        "    ENV_NAME = require_hud_env_name(",
-        "        TASK_DIR.parents[1] / '.env',",
-        "        allow_analysis_placeholder=True,",
-        '        error_message="HUD_ENV_NAME is required. Set it before running this task.",',
-        "    )",
-        "",
-        f'    WORKSPACE_DIR = "{WORKSPACE_DIR}"',
-        f"    STAGING_DIR = '/tmp/ast_pilot_node_{slug}'",
-        f"    NODE_MODULES_CACHE = '/tmp/ast_pilot_node_{slug}_modules'",
-        "    TESTS_DIR = TASK_DIR / 'tests'",
-        "    GOLDEN_DIR = TASK_DIR / 'golden'",
-        "    SUPPORT_DIR = TASK_DIR / 'support'",
-        "    CONFIG_DIR = TASK_DIR / 'config'",
-        "    BUNDLED_CONFIG_DIR = IMAGE_TASK_DIR / 'config'",
-        "    BUNDLED_SUPPORT_DIR = IMAGE_TASK_DIR / 'support'",
-        "    MANIFEST_PATH = TASK_DIR / 'node_bundle_manifest.json'",
-        "",
-        "    env = Environment(ENV_NAME)",
-        "    env.connect_hub(ENV_NAME)",
-        "",
-        "    def _load_manifest() -> dict:",
-        "        bundled = IMAGE_TASK_DIR / 'node_bundle_manifest.json'",
-        "        p = bundled if bundled.is_file() else MANIFEST_PATH",
-        "        return json.loads(p.read_text(encoding='utf-8'))",
-        "",
-        "    def _prepare_hidden_runtime(test_rel: str) -> str:",
-        '        """Build a bash command that stages the mirrored repo tree."""',
-        "        manifest = _load_manifest()",
-        "",
-        "        parts = []",
-        "",
-        "        parts.append(",
-        "            f'CONFIG_SRC={BUNDLED_CONFIG_DIR}; '",
-        "            f'if [ ! -d $CONFIG_SRC ]; then CONFIG_SRC={CONFIG_DIR}; fi; '",
-        "            f'SUPPORT_SRC={BUNDLED_SUPPORT_DIR}; '",
-        "            f'if [ ! -d $SUPPORT_SRC ]; then SUPPORT_SRC={SUPPORT_DIR}; fi'",
-        "        )",
-        "",
-        "        all_dirs = set()",
-        "        for section in ('source_files', 'test_files', 'support_files', 'config_files'):",
-        "            for rel in manifest.get(section, {}):",
-        "                parent = str(Path(rel).parent)",
-        "                if parent and parent != '.':",
-        "                    all_dirs.add(f'{STAGING_DIR}/{parent}')",
-        "        if all_dirs:",
-        "            parts.append(f'mkdir -p {\" \".join(sorted(all_dirs))}')",
-        "        parts.append(f'mkdir -p {STAGING_DIR}')",
-        "",
-        "        parts.append(",
-        "            f'if [ ! -f {NODE_MODULES_CACHE}/.installed ]; then '",
-        "            f'  mkdir -p {NODE_MODULES_CACHE} && '",
-        "            f'  cp $CONFIG_SRC/package.json {NODE_MODULES_CACHE}/ && '",
-        "            f'  cp $CONFIG_SRC/package-lock.json {NODE_MODULES_CACHE}/ 2>/dev/null; '",
-        "            f'  cp $CONFIG_SRC/.npmrc {NODE_MODULES_CACHE}/ 2>/dev/null; '",
-        "            f'  cd {NODE_MODULES_CACHE} && '",
-        "            f'  (npm ci --ignore-scripts 2>/dev/null || npm install --legacy-peer-deps --ignore-scripts) && '",
-        "            f'  touch {NODE_MODULES_CACHE}/.installed; '",
-        "            f'fi'",
-        "        )",
-        "",
-        "        for rel in sorted(manifest.get('config_files', {})):",
-        "            name = Path(rel).name",
-        "            parts.append(f'cp $CONFIG_SRC/{name} {STAGING_DIR}/{rel} 2>/dev/null')",
-        "",
-        "        parts.append(",
-        "            f'if [ -d {NODE_MODULES_CACHE}/node_modules ]; then '",
-        "            f'  ln -sfn {NODE_MODULES_CACHE}/node_modules {STAGING_DIR}/node_modules; '",
-        "            f'else '",
-        "            f'  cd {STAGING_DIR} && (npm ci --ignore-scripts 2>/dev/null || npm install --legacy-peer-deps --ignore-scripts); '",
-        "            f'fi'",
-        "        )",
-        "",
-        "        for rel in sorted(manifest.get('source_files', {})):",
-        "            basename = Path(rel).name",
-        "            parts.append(f'cp {WORKSPACE_DIR}/{basename} {STAGING_DIR}/{rel} 2>/dev/null')",
-        "",
-        "        for rel in sorted(manifest.get('support_files', {})):",
-        "            parts.append(f'cp $SUPPORT_SRC/{rel} {STAGING_DIR}/{rel} 2>/dev/null')",
-        "",
-        "        return '; '.join(parts) + '; '",
-        "",
-        "    def _inject_and_run(test_rel: str) -> str:",
-        '        """Build a bash command that writes a hidden test file and runs vitest.',
-        "",
-        "        File content is base64-encoded so regex backslash escapes can't be mangled",
-        "        by any intermediate shell or transport layer.",
-        '        """',
-        "        content = (TESTS_DIR / test_rel).read_text()",
-        "        encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')",
-        "        dest = f'{STAGING_DIR}/{test_rel}'",
-        "        return (",
-        "            f'{_prepare_hidden_runtime(test_rel)}'",
-        "            f'mkdir -p {os.path.dirname(dest)}\\n'",
-        "            f\"echo '{encoded}' | base64 -d > {dest}\\n\"",
-        "            f'cd {STAGING_DIR} && npx vitest run {test_rel} --reporter=verbose'",
-        "        )",
-        "",
-        "    def _golden_setup(source_rel: str, dest: str) -> str:",
-        '        """Build a bash command that writes the golden solution to the workspace.',
-        "",
-        "        Same base64 treatment as _inject_and_run: immune to backslash-escape",
-        "        corruption anywhere in the shell or transport chain.",
-        '        """',
-        "        content = (GOLDEN_DIR / source_rel).read_text()",
-        "        encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')",
-        "        return (",
-        "            f'mkdir -p {os.path.dirname(dest)}\\n'",
-        "            f\"echo '{encoded}' | base64 -d > {dest}\"",
-        "        )",
-        "",
-        "    task = Task(",
-        "        env=env,",
-        "        scenario=SCENARIO_ID,",
-        "        args={",
-        '            "prompt": (TASK_DIR / "prompt.md").read_text(),',
-        '            "bash_checks": [',
+        "task = Task(",
+        "    env=Environment(resolve_env_name(__file__)),",
+        "    scenario=SCENARIO_ID,",
+        "    args={",
+        '        "prompt": load_prompt(__file__),',
+        '        "graders": [',
     ]
-    lines.extend(checks_items)
+    for line in grader_lines:
+        lines.append(line[4:] if line.startswith("    ") else line)
     lines += [
-        "            ],",
-        "        },",
-        "    )",
-        f"    task.slug = {slug!r}",
-        "",
-        "    task.validation = [",
-    ]
-    lines.extend(validation_items)
-    lines += [
-        "    ]",
+        "        ],",
+        '        "support": load_support(__file__),',
+        '        "node_project": load_node_project(__file__),',
+        "    },",
+        ")",
+        f"task.slug = {slug!r}",
+        "task.validation = golden_workspace_validation(__file__)",
         "",
     ]
     return "\n".join(lines)

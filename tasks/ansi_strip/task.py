@@ -1,4 +1,4 @@
-"""Task: build hermes-retry from scratch."""
+"""Task: build ansi-strip from scratch."""
 
 from hud import Environment
 from hud.eval.task import Task
@@ -20,11 +20,11 @@ task = Task(
     args={
         "prompt": load_prompt(__file__),
         "graders": [
-            pytest_grader('test_retry_utils.py', task_file=__file__, weight=1.0),
+            pytest_grader('test_ansi_strip.py', task_file=__file__, weight=1.0),
         ],
         "support": load_support(__file__),
         "hidden_requirements": load_requirements(__file__),
     },
 )
-task.slug = 'hermes-retry'
+task.slug = 'ansi-strip'
 task.validation = golden_validation(__file__)

@@ -1,63 +1,30 @@
-# hermes_retry
+# hermes-retry
 
 ## Overview
 
-**hermes_retry** is a lightweight Python library providing retry utilities with jittered backoff mechanisms for decorrelated retries. The library consists of a single module, `retry_utils`, containing one module-level function that implements intelligent retry logic designed to mitigate thundering-herd problems in concurrent systems. With only 57 lines of code across a single source module, hermes_retry offers a minimal, focused implementation without class-based abstractions, making it suitable for direct functional integration into existing codebases.
+- Project name: hermes-retry
+- Total lines of code: 57
+- Number of source modules: 1
+- Classes: 0
+- Module-level functions: 1
+- Module 'retry_utils' docstring: Retry utilities — jittered backoff for decorrelated retries.
 
-The core functionality replaces naive fixed exponential backoff strategies with jittered delay calculations that decorrelate retry attempts across multiple concurrent sessions. This approach prevents synchronized retry spikes when multiple clients simultaneously encounter rate-limiting responses from the same upstream provider. By introducing randomized delays into the backoff sequence, hermes_retry reduces the probability of coordinated request clustering that would otherwise amplify load on already-constrained services.
-
-The library's single exported function provides a straightforward interface for implementing resilient retry behavior in network-dependent applications, particularly those interacting with rate-limited APIs or services prone to transient failures. The decorrelated jitter strategy ensures that retry timing remains unpredictable across distributed callers, thereby improving overall system stability under concurrent load conditions.
+Replaces fixed exponential backoff with jittered delays to prevent
+thundering-herd retry spikes when multiple sessions hit the same
+rate-limited provider concurrently.
 
 ## Natural Language Instructions
 
-You are rebuilding a Python library called `hermes_retry` from scratch. The library provides retry utilities with jittered exponential backoff to prevent thundering-herd retry spikes.
-
-### Implementation Constraints
-
-- Create the file at `/home/ubuntu/workspace/agent/retry_utils.py` (create the `agent/` directory if it does not exist).
-- The module must be importable as `from agent.retry_utils import jittered_backoff`.
-- Implement exactly one module-level function: `jittered_backoff`.
-- The function must use thread-safe randomization with a per-call seed derived from a monotonically incrementing counter and `time.time_ns()`.
-- Do not use external dependencies beyond Python's standard library (`random`, `time`, `threading`).
-- Preserve all function signatures exactly as specified; do not rename parameters or change defaults.
-- Handle edge cases (zero base_delay, negative attempts, extreme attempt numbers) without crashing.
+Before you start:
+- Create and edit the solution under `/home/ubuntu/workspace` at the exact workspace-relative paths below.
+- Workspace-relative paths for hidden-test imports: `agent/retry_utils.py`.
+- Implement every symbol listed in `Required Tested Symbols`, including underscored/private helpers.
+- Recreate any repo-internal helper behavior locally instead of trying to install private packages.
 
 ### Behavioral Requirements
 
-1. **Function signature**: `jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float = 120.0, jitter_ratio: float = 0.5) -> float` must exist at module level in `/home/ubuntu/workspace/agent/retry_utils.py`.
-
-2. **Exponential backoff calculation**: The base delay (before jitter) for a given attempt must be computed as `base_delay * (2 ** (attempt - 1))`. For example:
-   - attempt=1: base_delay * (2 ** 0) = base_delay * 1
-   - attempt=2: base_delay * (2 ** 1) = base_delay * 2
-   - attempt=3: base_delay * (2 ** 2) = base_delay * 4
-   - attempt=4: base_delay * (2 ** 3) = base_delay * 8
-
-3. **Max delay capping**: After computing the exponential backoff, the result must be capped at `max_delay`. The final base delay (before jitter) is `min(base_delay * (2 ** (attempt - 1)), max_delay)`.
-
-4. **Jitter application**: After computing the capped base delay, jitter must be applied by selecting a random value uniformly distributed in the range `[base_delay_capped, base_delay_capped * (1 + jitter_ratio)]`. For example, if the capped base delay is 10.0 and jitter_ratio is 0.5, the jittered delay must be uniformly distributed in [10.0, 15.0].
-
-5. **Zero jitter_ratio behavior**: When `jitter_ratio=0.0`, the function must return the capped base delay with no randomness. The range becomes `[base_delay_capped, base_delay_capped * (1 + 0.0)]` = `[base_delay_capped, base_delay_capped]`, which is a single value.
-
-6. **Attempt 1 with no jitter**: When `attempt=1`, `base_delay=3.0`, `max_delay=120.0`, and `jitter_ratio=0.0`, the function must return exactly `3.0`.
-
-7. **Zero base_delay guard**: When `base_delay=0.0`, the function must return `max_delay` (not 0.0). This prevents busy-wait loops. The exponential calculation would yield 0.0, but this must be treated as a special case that returns `max_delay` instead.
-
-8. **Negative attempt handling**: When `attempt` is negative (e.g., `attempt=-5`), the function must treat it as if `attempt=1`. It must not crash and must return the same delay as `attempt=1` with the same other parameters.
-
-9. **Extreme attempt numbers**: When `attempt` is very large (e.g., `attempt=999`), the exponential calculation may overflow or produce a value far exceeding `max_delay`. The function must cap the result at `max_delay` and return it without crashing.
-
-10. **Randomization with per-call seeding**: The function must use Python's `random.Random` class to generate jittered delays. Each call to `jittered_backoff` must create a new `Random` instance seeded with a unique value derived from:
-    - A module-level counter (`_jitter_counter`) that increments by 1 on each call, protected by a lock.
-    - The result of `time.time_ns()` captured at the moment the counter is incremented (under the same lock).
-    - The seed must be computed as `(time_ns_value, counter_value)` or a similar tuple that ensures uniqueness across concurrent calls.
-
-11. **Thread safety of counter**: The module must maintain a module-level variable `_jitter_counter` initialized to 0. This counter must be incremented atomically (under a lock) each time `jittered_backoff` is called. The lock must protect both the read and increment of the counter and the capture of `time.time_ns()`.
-
-12. **Concurrent call behavior**: When multiple threads call `jittered_backoff` concurrently with the same parameters (e.g., `attempt=1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5`), they must generally produce different delays due to different random seeds. Out of 8 concurrent calls, at least 6 must produce unique delay values.
-
-13. **Module imports**: The module must import `random`, `time`, and `threading` from the Python standard library. These imports must be accessible for monkeypatching in tests (e.g., `retry_utils.random`, `retry_utils.time`, `retry_utils.threading`).
-
-14. **Docstring**: The function must have a docstring that reads: `"Compute a jittered exponential backoff delay."` (exactly as specified in the EXACT API section).
+1. Implement the function `jittered_backoff(attempt, base_delay, max_delay, jitter_ratio)`
+   Compute a jittered exponential backoff delay.
 
 ## Required Tested Symbols
 
@@ -69,7 +36,7 @@ The hidden tests import every symbol listed here. Implement all of them, includi
 
 ### Python Version
 
-Python >=3.11
+Python 3.12
 
 ### Workspace
 
@@ -133,71 +100,130 @@ def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float 
 
 ## Implementation Notes
 
-### Node 1: Exponential backoff calculation
+The following behaviors are validated by the test suite:
 
-The `jittered_backoff` function computes a base delay using exponential backoff with the formula:
-```
-base_delay * (2 ** (attempt - 1))
-```
+### Note 1: test_backoff_is_exponential
+Tests symbols: `jittered_backoff`
 
-For `attempt=1`, the exponent is `0`, so the result is `base_delay * 1 = base_delay`.
-For `attempt=2`, the exponent is `1`, so the result is `base_delay * 2`.
-For `attempt=3`, the exponent is `2`, so the result is `base_delay * 4`.
-For `attempt=4`, the exponent is `3`, so the result is `base_delay * 8`.
-
-When `jittered_backoff(1, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `5.0`.
-When `jittered_backoff(2, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `10.0`.
-When `jittered_backoff(3, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `20.0`.
-When `jittered_backoff(4, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `40.0`.
-
-### Node 2: Maximum delay capping
-
-The computed exponential backoff delay is capped at `max_delay`. The effective delay is:
-```
-min(base_delay * (2 ** (attempt - 1)), max_delay)
+```python
+def test_backoff_is_exponential():
+    """Base delay should double each attempt (before jitter)."""
+    for attempt in (1, 2, 3, 4):
+        delays = [jittered_backoff(attempt, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0) for _ in range(100)]
+        expected = min(5.0 * (2 ** (attempt - 1)), 120.0)
+        mean = sum(delays) / len(delays)
+        assert abs(mean - expected) < 0.01, f"attempt {attempt}: expected {expected}, got {mean}"
 ```
 
-When `jittered_backoff(10, base_delay=5.0, max_delay=60.0, jitter_ratio=0.0)` is called, the result does not exceed `60.0`.
-When `jittered_backoff(20, base_delay=5.0, max_delay=60.0, jitter_ratio=0.0)` is called, the result does not exceed `60.0`.
-When `jittered_backoff(100, base_delay=5.0, max_delay=60.0, jitter_ratio=0.0)` is called, the result does not exceed `60.0`.
-When `jittered_backoff(999, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `120.0`.
+### Note 2: test_backoff_respects_max_delay
+Tests symbols: `jittered_backoff`
 
-### Node 3: Zero base_delay guard
+```python
+def test_backoff_respects_max_delay():
+    """Even with high attempt numbers, delay should not exceed max_delay."""
+    for attempt in (10, 20, 100):
+        delay = jittered_backoff(attempt, base_delay=5.0, max_delay=60.0, jitter_ratio=0.0)
+        assert delay <= 60.0, f"attempt {attempt}: delay {delay} exceeds max 60s"
+```
 
-When `base_delay=0.0`, the function returns `max_delay` instead of `0.0`. This prevents busy-wait behavior.
+### Note 3: test_backoff_adds_jitter
+Tests symbols: `jittered_backoff`
 
-When `jittered_backoff(1, base_delay=0.0, max_delay=60.0, jitter_ratio=0.0)` is called, the result is exactly `60.0`.
+```python
+def test_backoff_adds_jitter():
+    """With jitter enabled, delays should vary across calls."""
+    delays = [jittered_backoff(1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5) for _ in range(50)]
+    assert min(delays) != max(delays), "jitter should produce varying delays"
+    assert all(d >= 10.0 for d in delays), "jittered delay should be >= base delay"
+    assert all(d <= 15.0 for d in delays), "jittered delay should be bounded"
+```
 
-### Node 4: Negative attempt handling
+### Note 4: test_backoff_attempt_1_is_base
+Tests symbols: `jittered_backoff`
 
-Negative attempt values do not cause crashes. A negative attempt is treated as if `attempt=1`.
+```python
+def test_backoff_attempt_1_is_base():
+    """First attempt delay should equal base_delay (with no jitter)."""
+    delay = jittered_backoff(1, base_delay=3.0, max_delay=120.0, jitter_ratio=0.0)
+    assert delay == 3.0
+```
 
-When `jittered_backoff(-5, base_delay=10.0, max_delay=120.0, jitter_ratio=0.0)` is called, the result is exactly `10.0`.
+### Note 5: test_backoff_with_zero_base_delay_returns_max
+Tests symbols: `jittered_backoff`
 
-### Node 5: Jitter application
+```python
+def test_backoff_with_zero_base_delay_returns_max():
+    """base_delay=0 should return max_delay (guard against busy-wait)."""
+    delay = jittered_backoff(1, base_delay=0.0, max_delay=60.0, jitter_ratio=0.0)
+    assert delay == 60.0
+```
 
-When `jitter_ratio > 0.0`, the function applies jitter to the computed base delay. The jitter is applied as a uniform random variation.
+### Note 6: test_backoff_with_extreme_attempt_returns_max
+Tests symbols: `jittered_backoff`
 
-When `jitter_ratio=0.0`, no jitter is applied and the delay is deterministic.
+```python
+def test_backoff_with_extreme_attempt_returns_max():
+    """Very large attempt numbers should not overflow and should return max_delay."""
+    delay = jittered_backoff(999, base_delay=5.0, max_delay=120.0, jitter_ratio=0.0)
+    assert delay == 120.0
+```
 
-When `jitter_ratio=0.5` and `attempt=1` with `base_delay=10.0` and `max_delay=120.0`:
-- Multiple calls produce varying delays (not all identical).
-- All delays are `>= 10.0` (the base delay).
-- All delays are `<= 15.0` (the base delay plus jitter).
+### Note 7: test_backoff_negative_attempt_treated_as_one
+Tests symbols: `jittered_backoff`
 
-The jitter range is bounded by `base_delay * jitter_ratio`, so the final jittered delay is in the range `[base_delay, base_delay * (1 + jitter_ratio)]`.
+```python
+def test_backoff_negative_attempt_treated_as_one():
+    """Negative attempt should not crash and behaves like attempt=1."""
+    delay = jittered_backoff(-5, base_delay=10.0, max_delay=120.0, jitter_ratio=0.0)
+    assert delay == 10.0
+```
 
-### Node 6: Jitter seeding with per-call tick under lock
+### Note 8: test_backoff_thread_safety
+Tests symbols: `jittered_backoff`
 
-The jitter random number generator is seeded using a per-call tick value captured under a lock. The implementation uses:
-- A global counter `_jitter_counter` that increments on each call.
-- A call to `time.time_ns()` to obtain a high-resolution timestamp.
-- A `random.Random` instance initialized with a seed derived from the timestamp.
+```python
+def test_backoff_thread_safety():
+    """Concurrent calls should generally produce different delays."""
+    results = []
+    barrier = threading.Barrier(8)
 
-Each call to `jittered_backoff` increments `_jitter_counter` and captures the current `time_ns()` value under a lock. This captured tick is used as the seed for the `random.Random` instance.
+    def _call_backoff():
+        barrier.wait()
+        results.append(jittered_backoff(1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5))
 
-When two concurrent threads call `jittered_backoff` simultaneously (synchronized via a barrier), they each capture a different tick value and thus receive different seeds. The recorded seeds are unique across the two calls.
+    threads = [threading.Thread(target=_call_backoff) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
 
-### Node 7: Thread safety
+    assert len(results) == 8
+    unique = len(set(results))
+    assert unique >= 6, f"Expected mostly unique delays, got {unique}/8 unique"
+```
 
-Concurrent calls to `jittered_backoff` with `jitter_ratio > 0.0` produce different delays. When 8 threads call `jittered_backoff(1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5)` concurrently, at least 6 of the 8 results are unique (i.e., `len(set(results)) >= 6`).
+### Note 9: test_backoff_uses_locked_tick_for_seed
+Tests symbols: `jittered_backoff`
+
+```python
+def test_backoff_uses_locked_tick_for_seed(monkeypatch):
+    """Seed derivation should use per-call tick captured under lock."""
+    import time
+
+    monkeypatch.setattr(retry_utils, "_jitter_counter", 0)
+
+    recorded_seeds = []
+
+    class _RecordingRandom:
+        def __init__(self, seed):
+            recorded_seeds.append(seed)
+
+        def uniform(self, a, b):
+            return 0.0
+
+    monkeypatch.setattr(retry_utils.random, "Random", _RecordingRandom)
+
+    fixed_time_ns = 123456789
+
+    def _time_ns_wait_for_two_ticks():
+```

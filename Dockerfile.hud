@@ -82,7 +82,6 @@ FROM setup AS hud_analysis_base
 RUN pip install uv --break-system-packages
 
 COPY ./pyproject.toml /mcp_server/pyproject.toml
-COPY ./build_support.py /mcp_server/build_support.py
 WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
@@ -91,21 +90,17 @@ ENV PYTHONPATH=/mcp_server
 ENV PATH=/mcp_server/.venv/bin:$PATH
 
 COPY ./env.py /mcp_server/env.py
-COPY ./task_bootstrap.py /mcp_server/task_bootstrap.py
 COPY ./cli.py /mcp_server/cli.py
-COPY ./grading /mcp_server/grading
-COPY ./tasks /mcp_server/tasks
 
-RUN python /mcp_server/build_support.py
+# v2 architecture: tasks live in the registry, not on the image. The package
+# shell exists so env.py's ``import tasks`` resolves — it stays an empty
+# auto-discovery root at runtime.
+RUN mkdir -p /mcp_server/tasks
+COPY ./tasks/__init__.py /mcp_server/tasks/__init__.py
 
-RUN if [ -f /tmp/ast_pilot_hidden_requirements.txt ]; then uv pip install -r /tmp/ast_pilot_hidden_requirements.txt; fi
-
-# Security: agent cannot read grading logic or scenario internals
-RUN chmod 700 /mcp_server/env.py /mcp_server/tasks /mcp_server/grading
-RUN chmod -R 755 /opt/ast_pilot_support
+RUN chmod 700 /mcp_server/env.py
 
 ENV WORKSPACE_DIR=/home/ubuntu/workspace
-ENV AST_PILOT_SUPPORT_ROOT=/opt/ast_pilot_support
 
 ENV HUD_API_KEY=
 ENV _HUD_DEV_CHILD=1
