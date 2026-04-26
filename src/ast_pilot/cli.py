@@ -123,6 +123,13 @@ def cmd_bundle(args: argparse.Namespace) -> None:
                     print(f"  [BLOCKING] {issue.title}: {issue.rationale}")
                 _print_alignment_verdict(alignment)
                 raise SystemExit(2)
+            elif alignment.is_unavailable:
+                print(
+                    f"  Alignment: UNAVAILABLE ({len(alignment.unavailable_tests)} test file(s) — "
+                    "coverage unknown, NOT clean):"
+                )
+                for name in alignment.unavailable_tests:
+                    print(f"    - {name}")
             elif alignment.is_clean:
                 print("  Alignment: PASSED (no issues)")
             else:
@@ -284,6 +291,11 @@ def cmd_run(args: argparse.Namespace) -> None:
             console.detail(issue.message)
         raise SystemExit(2)
 
+    # The fix loop above rewrites prompt.md on disk; reload before bundling so
+    # the task package matches what validation actually approved instead of the
+    # pre-fix string still in `md`.
+    md = (out_dir / "prompt.md").read_text(encoding="utf-8")
+
     promoted_to: Path | None = None
     try:
         with console.phase("bundle", icon="☰") as p:
@@ -318,6 +330,14 @@ def cmd_run(args: argparse.Namespace) -> None:
                         alignment_extras.append(("note", alignment.verdict))
                     p.set_detail("blocking")
                     raise SystemExit(2)
+                elif alignment.is_unavailable:
+                    p.warn(
+                        f"alignment unavailable for {len(alignment.unavailable_tests)} test "
+                        "file(s) — coverage unknown, NOT clean"
+                    )
+                    for name in alignment.unavailable_tests:
+                        console.detail(name)
+                    p.set_detail("unavailable")
                 elif alignment.is_clean:
                     p.success("no issues")
                     p.set_detail("clean")

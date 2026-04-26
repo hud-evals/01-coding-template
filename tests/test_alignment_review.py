@@ -73,12 +73,16 @@ class AlignmentReviewTests(unittest.TestCase):
         self.assertFalse(result.has_blocking)
         self.assertEqual(len(result.fixable_issues), 1)
 
-    def test_malformed_json_retry_then_empty(self) -> None:
+    def test_malformed_json_marks_review_unavailable(self) -> None:
+        """LLM returning None on every retry is `unavailable`, not `clean` —
+        a silent failure must NOT pass through as 'no issues found'."""
         with tempfile.TemporaryDirectory() as tmpdir:
             task_dir = _make_task_dir(tmpdir)
             with patch("ast_pilot.alignment_review.call_text_llm", return_value=None):
                 result = review_task_alignment(task_dir)
-        self.assertTrue(result.is_clean)
+        self.assertTrue(result.is_unavailable)
+        self.assertFalse(result.is_clean)
+        self.assertEqual(result.unavailable_tests, ["test_demo.py"])
 
     def test_malformed_json_string_retries_once(self) -> None:
         calls = []

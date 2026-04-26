@@ -133,6 +133,10 @@ class AlignmentReview:
     issues: list[AlignmentIssue] = field(default_factory=list)
     confidence: str = ""
     verdict: str = ""
+    # Per-test-file review failures (LLM returned None / unparseable JSON).
+    # When non-empty, the review is incomplete: callers must NOT treat
+    # `is_clean` as "no problems" — coverage for these files is unknown.
+    unavailable_tests: list[str] = field(default_factory=list)
 
     @property
     def blocking_issues(self) -> list[AlignmentIssue]:
@@ -148,7 +152,11 @@ class AlignmentReview:
 
     @property
     def is_clean(self) -> bool:
-        return len(self.issues) == 0
+        return len(self.issues) == 0 and not self.unavailable_tests
+
+    @property
+    def is_unavailable(self) -> bool:
+        return bool(self.unavailable_tests)
 
 
 def review_task_alignment(
@@ -213,10 +221,14 @@ def review_task_alignment(
 
     raw_issues: list[dict] = []
     raw_literal_checks: list[dict] = []
+    unavailable_tests: list[str] = []
     t0 = _time.monotonic()
     n = len(test_files)
 
-    def _consume(per_file: dict) -> str:
+    def _consume(per_file: dict, test_name: str) -> str:
+        if per_file.get("_review_failed"):
+            unavailable_tests.append(test_name)
+            return " (review unavailable)"
         issues = per_file.get("issues", []) or []
         checks = per_file.get("literal_checks", []) or []
         raw_issues.extend(issues)
@@ -238,7 +250,7 @@ def review_task_alignment(
                 gap_context=gap_context,
                 assertion_context=assertion_context,
             )
-        _log(f"  [1/1] {test_name} done{_consume(per_file)} [{_time.monotonic() - t0:.1f}s]")
+        _log(f"  [1/1] {test_name} done{_consume(per_file, test_name)} [{_time.monotonic() - t0:.1f}s]")
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -261,7 +273,7 @@ def review_task_alignment(
                     done_count += 1
                     test_name = futures[fut]
                     per_file = fut.result()
-                    _log(f"  [{done_count}/{n}] {test_name}{_consume(per_file)}")
+                    _log(f"  [{done_count}/{n}] {test_name}{_consume(per_file, test_name)}")
 
         _log(f"  all {n} reviews done [{_time.monotonic() - t0:.1f}s]")
 
@@ -269,11 +281,18 @@ def review_task_alignment(
     if forced_issues:
         _log(f"  forced issues from failed literal checks: {len(forced_issues)}")
 
+    if unavailable_tests:
+        _log(
+            f"  [WARN] {len(unavailable_tests)}/{n} test file(s) had unavailable "
+            "alignment review (LLM returned no parseable response). Coverage for "
+            f"those files is UNKNOWN: {', '.join(unavailable_tests)}"
+        )
+
     if not raw_issues and not forced_issues:
         with _ui().live_status("verdict pass"):
             verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=[])
         _log(f"  verdict pass done [{_time.monotonic() - t0:.1f}s total]")
-        return AlignmentReview(**verdict)
+        return AlignmentReview(unavailable_tests=unavailable_tests, **verdict)
 
     if raw_issues:
         with _ui().live_status(f"confirmation pass ({len(raw_issues)} candidate issues)"):
@@ -292,6 +311,7 @@ def review_task_alignment(
         verdict = _get_confidence_verdict(prompt_md, test_files, gap_context, issues=final_issues)
     review.confidence = verdict.get("confidence", "")
     review.verdict = verdict.get("verdict", "")
+    review.unavailable_tests = unavailable_tests
     _log(f"  verdict pass done [{_time.monotonic() - t0:.1f}s total]")
     return review
 
@@ -470,7 +490,9 @@ Rules for literal_checks:
             "alignment check for this file was SKIPPED. Set AST_PILOT_DEBUG_REVIEW=<dir> "
             "to capture the raw response."
         )
-        return {"issues": [], "literal_checks": []}
+        # Sentinel: caller must NOT treat this as "clean review with zero issues".
+        # The review didn't run; coverage for this test file is unknown.
+        return {"issues": [], "literal_checks": [], "_review_failed": True}
 
     return _parse_review_response(response)
 

@@ -477,15 +477,30 @@ def _write_test_files(
             rewritten = _prepend_workspace_syspath(rewritten)
             warnings, skip_marks = _detect_cross_module_path_access(rewritten, test_path)
             cross_module_warnings.extend(warnings)
-            rewritten = _insert_skip_marks(rewritten, skip_marks)
+            if skip_marks and allow_unsupported_test_refs:
+                rewritten = _insert_skip_marks(rewritten, skip_marks)
             destination = paths.tests_dir / test_path.name
             _write(destination, rewritten)
             files.append(test_path.name)
+        if cross_module_warnings and not allow_unsupported_test_refs:
+            # Same policy as `_guard_unsupported_test_refs`: hard-fail by default
+            # so a generator run can't silently ship a task with weakened test
+            # coverage. Set AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1 to downgrade
+            # to pytest.mark.skip with a visible warning instead.
+            raise ValueError(
+                "Hidden tests use Path(__file__).parents[N] which resolves to /tmp at "
+                "grading time, not the agent workspace. Set "
+                f"{ALLOW_UNSUPPORTED_TEST_REFS_ENV}=1 to auto-skip these tests "
+                "(weakens coverage) or rewrite the offending tests to avoid "
+                "cross-module path walks. Offending references:\n  - "
+                + "\n  - ".join(cross_module_warnings)
+            )
         if cross_module_warnings:
             from .tui import ui as _ui
             _ui().warn(
                 "hidden tests use Path(__file__).parents[N] — auto-skipped at "
-                "grading time (pytest.mark.skip) so they don't block passing scores"
+                f"grading time (pytest.mark.skip) because {ALLOW_UNSUPPORTED_TEST_REFS_ENV}=1. "
+                "Coverage is weakened; remove the env var to fail generation instead."
             )
             for warning in cross_module_warnings:
                 _ui().detail(warning)

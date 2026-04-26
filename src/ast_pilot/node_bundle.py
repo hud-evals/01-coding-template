@@ -156,61 +156,6 @@ def audit_bare_imports(
     return issues
 
 
-def generate_staging_bash(
-    manifest: NodeBundleManifest,
-    staging_dir: str,
-    modules_cache: str,
-    workspace_dir: str,
-    config_src_expr: str,
-) -> str:
-    """Generate bash that mirrors the repo tree in STAGING_DIR from the manifest."""
-    lines: list[str] = []
-
-    all_dirs: set[str] = set()
-    for rel in list(manifest.source_files) + list(manifest.test_files) + list(manifest.support_files) + list(manifest.config_files):
-        parent = str(Path(rel).parent)
-        if parent and parent != ".":
-            all_dirs.add(parent)
-
-    if all_dirs:
-        dir_list = " ".join(f"{staging_dir}/{d}" for d in sorted(all_dirs))
-        lines.append(f"mkdir -p {dir_list}")
-
-    lines.append(f"mkdir -p {staging_dir}")
-
-    lines.append(
-        f"CONFIG_SRC={config_src_expr}; "
-    )
-    lines.append(
-        f"if [ ! -f {modules_cache}/.installed ]; then "
-        f"  mkdir -p {modules_cache} && "
-        f"  cp $CONFIG_SRC/package.json {modules_cache}/ && "
-        f"  cp $CONFIG_SRC/package-lock.json {modules_cache}/ 2>/dev/null; "
-        f"  cp $CONFIG_SRC/.npmrc {modules_cache}/ 2>/dev/null; "
-        f"  cd {modules_cache} && "
-        f"  (npm ci --ignore-scripts 2>/dev/null || npm install --legacy-peer-deps --ignore-scripts) && "
-        f"  touch {modules_cache}/.installed; "
-        f"fi"
-    )
-
-    for rel in sorted(manifest.config_files):
-        name = Path(rel).name
-        lines.append(f"cp $CONFIG_SRC/{name} {staging_dir}/{rel} 2>/dev/null")
-
-    lines.append(
-        f"if [ -d {modules_cache}/node_modules ]; then "
-        f"  ln -sfn {modules_cache}/node_modules {staging_dir}/node_modules; "
-        f"else "
-        f"  cd {staging_dir} && (npm ci --ignore-scripts 2>/dev/null || npm install --legacy-peer-deps --ignore-scripts); "
-        f"fi"
-    )
-
-    for rel in sorted(manifest.source_files):
-        lines.append(f"cp {workspace_dir}/{rel} {staging_dir}/{rel} 2>/dev/null")
-
-    return "; ".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

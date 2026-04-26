@@ -1415,49 +1415,79 @@ class GraderGenTests(unittest.TestCase):
         )
         self.assertTrue(decorator_line.startswith("    @"))
 
-    def test_cross_module_test_is_auto_skipped_at_generation_time(self) -> None:
+    def _build_cross_module_test_repo(self, root: Path) -> tuple[Path, Path]:
+        (root / "pyproject.toml").write_text(
+            "[project]\nname='demo'\nversion='0.1.0'\n",
+            encoding="utf-8",
+        )
+        (root / "app").mkdir()
+        (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+        source_path = root / "app" / "target.py"
+        source_path.write_text("def run(): return 1\n", encoding="utf-8")
+
+        tests_dir = root / "tests"
+        tests_dir.mkdir()
+        test_path = tests_dir / "test_target.py"
+        test_path.write_text(
+            textwrap.dedent(
+                """
+                from pathlib import Path
+                from app.target import run
+
+                def test_run(): assert run() == 1
+
+                def test_reads_sibling():
+                    p = Path(__file__).resolve().parents[2] / "other" / "file.py"
+                    assert p.exists()
+                """
+            ).strip() + "\n",
+            encoding="utf-8",
+        )
+        return source_path, test_path
+
+    def test_cross_module_test_hard_fails_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            (root / "pyproject.toml").write_text(
-                "[project]\nname='demo'\nversion='0.1.0'\n",
-                encoding="utf-8",
-            )
-            (root / "app").mkdir()
-            (root / "app" / "__init__.py").write_text("", encoding="utf-8")
-            source_path = root / "app" / "target.py"
-            source_path.write_text("def run(): return 1\n", encoding="utf-8")
-
-            tests_dir = root / "tests"
-            tests_dir.mkdir()
-            test_path = tests_dir / "test_target.py"
-            test_path.write_text(
-                textwrap.dedent(
-                    """
-                    from pathlib import Path
-                    from app.target import run
-
-                    def test_run(): assert run() == 1
-
-                    def test_reads_sibling():
-                        p = Path(__file__).resolve().parents[2] / "other" / "file.py"
-                        assert p.exists()
-                    """
-                ).strip() + "\n",
-                encoding="utf-8",
-            )
-
+            source_path, test_path = self._build_cross_module_test_repo(root)
             ev = scan(
                 source_paths=[source_path],
                 test_paths=[test_path],
                 project_name="target-task",
             )
-            files = generate_graders(
-                ev,
-                output_dir=root / "out",
-                prompt_md="# demo\n",
+            with self.assertRaisesRegex(ValueError, r"Path\(__file__\)\.parents"):
+                generate_graders(
+                    ev,
+                    output_dir=root / "out",
+                    prompt_md="# demo\n",
+                    source_paths=[source_path],
+                    test_paths=[test_path],
+                )
+
+    def test_cross_module_test_auto_skipped_when_env_var_allows(self) -> None:
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path, test_path = self._build_cross_module_test_repo(root)
+            ev = scan(
                 source_paths=[source_path],
                 test_paths=[test_path],
+                project_name="target-task",
             )
+            prev = os.environ.get("AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS")
+            os.environ["AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"] = "1"
+            try:
+                files = generate_graders(
+                    ev,
+                    output_dir=root / "out",
+                    prompt_md="# demo\n",
+                    source_paths=[source_path],
+                    test_paths=[test_path],
+                )
+            finally:
+                if prev is None:
+                    os.environ.pop("AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS", None)
+                else:
+                    os.environ["AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"] = prev
             rewritten_test = files["tasks/target-task/tests/test_target.py"]
             self.assertIn('@__import__("pytest").mark.skip', rewritten_test)
             self.assertIn("parents[2]", rewritten_test)
