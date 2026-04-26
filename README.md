@@ -34,6 +34,7 @@ hud deploy .             # builds the image, pushes it, registers the scenarios
 | `HUD_API_KEY` | required | Auth for HUD platform + LLM inference gateway |
 | `AST_PILOT_MODEL` | `claude-haiku-4-5` | Model for the generator's prompt / alignment passes |
 | `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS` | unset | `1` to downgrade unsupported test imports instead of failing |
+| `AST_PILOT_ALLOW_ALIGNMENT_UNAVAILABLE` | unset | `1` to promote even when the alignment reviewer never returned parseable JSON. Coverage will be unknown — only set during a known LLM provider outage. Equivalent to `--allow-alignment-unavailable`. |
 | `CODING_GITHUB_TOKEN` | unset | Build secret for private-repo clones in `Dockerfile.hud` |
 
 The deployed environment name lives in `.hud/config.json` (`registryName`) and is picked up automatically by the generator + sync flow — no `.env` or `HUD_ENV_NAME` export needed.
@@ -186,9 +187,16 @@ Flags:
 
 - `--no-llm` — skip prose generation for fast structural smoke tests
 - `--no-alignment-autofix` — skip the alignment pass
+- `--allow-alignment-unavailable` — promote even when the reviewer never returned parseable JSON (LLM outage escape hatch; equivalent to `AST_PILOT_ALLOW_ALIGNMENT_UNAVAILABLE=1`)
 - `--plain` (or `AST_PILOT_PLAIN=1`) — disable the rich TUI (CI-friendly)
 
-If hidden tests depend on repo-internal modules the generator can't carry, generation fails by default. Set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1` to downgrade instead.
+Failure modes the generator hard-fails on by default (with explicit escape hatches):
+
+- Hidden tests depending on repo-internal modules the generator can't carry → set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1` to downgrade them to `pytest.mark.skip`.
+- Hidden tests using `Path(__file__).parents[N]` to walk above the test directory → same env var. These resolve to `/tmp` at grading time, not the agent workspace.
+- Alignment reviewer returning no parseable response on every retry → set `AST_PILOT_ALLOW_ALIGNMENT_UNAVAILABLE=1` (or pass `--allow-alignment-unavailable`). Use only when the LLM provider is degraded; the resulting task ships with unknown coverage.
+
+For TypeScript projects the generator additionally requires a usable Node project at the import root: `package.json`, vitest as the test runner, no monorepo workspaces, no path aliases, no unresolved local vitest setupFiles. Missing `package-lock.json` is auto-generated for you in a temp dir — the source repo is never modified.
 
 ### Generated task package
 
@@ -261,6 +269,10 @@ The alignment pass extracts every literal in the hidden tests' `assert <LIT> in 
 **`ModuleNotFoundError` during integration_test** — Usually a missing helper in `support/`, a missing dependency in `requirements.hidden.txt`, or a bad import rewrite. Check the failing import first.
 
 **Generation fails on unsupported internal modules** — Expected. Pick a simpler source module, trim the test surface, or set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`.
+
+**Generation aborts with `alignment unavailable`** — The LLM reviewer returned nothing parseable on every retry; the generator refuses to ship a task with unknown coverage. Retry once the provider recovers, or pass `--allow-alignment-unavailable` if you need to ship anyway (the generated task will sync but reviewers should manually audit the prompt).
+
+**TypeScript generation refuses with unsupported reasons** — The repo isn't compatible with v0 TS mode (monorepo workspaces, non-vitest runner, path aliases, unresolved vitest setupFiles). Either split out the package you care about into a single-package layout, or fix the offending config. Missing `package-lock.json` is the only one that auto-resolves (in a temp dir — your repo is left alone).
 
 **integration_test shows stale behavior after editing a task** — Did you run `hud sync tasks -y`? Task content only reaches the platform via sync. If you only edited the generator or helpers, regenerate the affected tasks first.
 

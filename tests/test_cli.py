@@ -364,6 +364,174 @@ class CliAlignmentTests(unittest.TestCase):
 
             mock_loop.assert_not_called()
 
+    def test_run_uses_post_fix_prompt_after_fix_loop(self) -> None:
+        """Regression: the validation/fix loop rewrites prompt.md on disk; cmd_run
+        must reload that file before bundling so the task ships the post-fix
+        prompt, not the stale in-memory string from before validation ran."""
+        captured_prompts: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "demo.py"
+            source_path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+            (root / "tasks").mkdir()
+            out_dir = root / "output"
+
+            args = argparse.Namespace(
+                sources=[str(source_path)],
+                tests=None,
+                name="demo-task",
+                readme=None,
+                output=str(out_dir),
+                no_llm=False,
+                no_alignment_autofix=True,
+                alignment_max_rounds=2,
+            )
+
+            initial_validation = ValidationResult(
+                issues=[ValidationIssue("error", "params", "drift", line=1)]
+            )
+            post_fix_validation = ValidationResult()
+
+            def fake_fix_issues(ev, prompt_path, vr):
+                Path(prompt_path).write_text("# demo-task POST-FIX\n", encoding="utf-8")
+                return None, []
+
+            def fake_generate(ev, output_dir, prompt_md, source_paths, test_paths):
+                captured_prompts.append(prompt_md)
+                generated = Path(output_dir) / "tasks" / "demo-task"
+                generated.mkdir(parents=True)
+                (generated / "task.py").write_text("task = 1\n", encoding="utf-8")
+                return {"tasks/demo-task/task.py": "task = 1\n"}
+
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with (
+                    patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
+                    patch(
+                        "ast_pilot.validator.validate",
+                        side_effect=[initial_validation, post_fix_validation],
+                    ),
+                    patch("ast_pilot.fixer.fix_issues", side_effect=fake_fix_issues),
+                    patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
+                ):
+                    cmd_run(args)
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(len(captured_prompts), 1)
+            self.assertEqual(
+                captured_prompts[0],
+                "# demo-task POST-FIX\n",
+                "generate_graders received the pre-fix prompt — the fix loop's "
+                "rewrite of prompt.md was not picked up before bundling",
+            )
+
+    def test_alignment_unavailable_blocks_promotion_by_default(self) -> None:
+        """Regression: alignment review failures used to be reported as 'unavailable'
+        but the task still got promoted. A silent reviewer outage must NOT ship
+        a task whose coverage is unknown."""
+        from ast_pilot.alignment_review import AlignmentReview
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "demo.py"
+            source_path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+            (root / "tasks").mkdir()
+            out_dir = root / "output"
+
+            args = argparse.Namespace(
+                sources=[str(source_path)],
+                tests=None,
+                name="demo-task",
+                readme=None,
+                output=str(out_dir),
+                no_llm=False,
+                no_alignment_autofix=False,
+                alignment_max_rounds=2,
+                allow_alignment_unavailable=False,
+            )
+
+            unavailable_review = AlignmentReview(unavailable_tests=["test_demo.py"])
+
+            def fake_generate(ev, output_dir, prompt_md, source_paths, test_paths):
+                generated = Path(output_dir) / "tasks" / "demo-task"
+                generated.mkdir(parents=True)
+                (generated / "task.py").write_text("task = 1\n", encoding="utf-8")
+                return {"tasks/demo-task/task.py": "task = 1\n"}
+
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with (
+                    patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
+                    patch("ast_pilot.validator.validate", return_value=ValidationResult()),
+                    patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
+                    patch("ast_pilot.cli._run_alignment_loop", return_value=unavailable_review),
+                ):
+                    with self.assertRaises(SystemExit) as ctx:
+                        cmd_run(args)
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse(
+                (root / "tasks" / "demo_task").exists(),
+                "Promotion ran despite alignment being unavailable",
+            )
+
+    def test_alignment_unavailable_promotes_when_explicitly_allowed(self) -> None:
+        """Companion to the block-by-default test: with the explicit escape hatch,
+        unavailable alignment must still ship — degraded LLMs cannot leave
+        users permanently unable to generate tasks."""
+        from ast_pilot.alignment_review import AlignmentReview
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "demo.py"
+            source_path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+            (root / "tasks").mkdir()
+            out_dir = root / "output"
+
+            args = argparse.Namespace(
+                sources=[str(source_path)],
+                tests=None,
+                name="demo-task",
+                readme=None,
+                output=str(out_dir),
+                no_llm=False,
+                no_alignment_autofix=False,
+                alignment_max_rounds=2,
+                allow_alignment_unavailable=True,
+            )
+
+            unavailable_review = AlignmentReview(unavailable_tests=["test_demo.py"])
+
+            def fake_generate(ev, output_dir, prompt_md, source_paths, test_paths):
+                generated = Path(output_dir) / "tasks" / "demo-task"
+                generated.mkdir(parents=True)
+                (generated / "task.py").write_text("task = 1\n", encoding="utf-8")
+                return {"tasks/demo-task/task.py": "task = 1\n"}
+
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with (
+                    patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
+                    patch("ast_pilot.validator.validate", return_value=ValidationResult()),
+                    patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
+                    patch("ast_pilot.cli._run_alignment_loop", return_value=unavailable_review),
+                ):
+                    cmd_run(args)
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertTrue((root / "tasks" / "demo_task" / "task.py").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

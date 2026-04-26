@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,10 @@ class NodeRepoContext:
     module_type: str
     node_version_floor: str
     unsupported_reasons: list[str] = field(default_factory=list)
+    # Lockfile content generated in a temp directory because the source repo
+    # had none. Stored here so the bundler can stage it without ever touching
+    # the user's worktree. ``None`` when the on-disk lockfile is authoritative.
+    generated_lockfile_content: str | None = None
 
     @property
     def is_supported(self) -> bool:
@@ -83,8 +88,10 @@ def detect_node_project(
         raise ValueError(f"Could not read {pkg_path}: {exc}") from exc
 
     has_lockfile = (root / "package-lock.json").exists()
+    generated_lockfile_content: str | None = None
     if require_lockfile and not has_lockfile and auto_generate_lockfile:
-        has_lockfile = _auto_generate_lockfile(root)
+        generated_lockfile_content = _auto_generate_lockfile(root)
+        has_lockfile = generated_lockfile_content is not None
 
     tsconfig = _find_first(root, TSCONFIG_NAMES)
     vitest_config = _find_first(root, VITEST_CONFIG_NAMES)
@@ -123,38 +130,53 @@ def detect_node_project(
         module_type=module_type,
         node_version_floor=node_version,
         unsupported_reasons=unsupported,
+        generated_lockfile_content=generated_lockfile_content,
     )
 
 
-def _auto_generate_lockfile(root: Path) -> bool:
-    """Auto-generate package-lock.json when missing (e.g. pnpm/yarn repos)."""
+def _auto_generate_lockfile(root: Path) -> str | None:
+    """Generate ``package-lock.json`` for *root* in a throwaway temp dir.
+
+    Returns the lockfile contents on success, ``None`` on failure. The source
+    repo is never touched: callers depending on a CLI to "be a tool, not a
+    teammate" should not be surprised by mutated worktrees.
+    """
     pkg_json = root / "package.json"
     if not pkg_json.exists():
-        return False
-    print(f"  [node] No package-lock.json found, generating from package.json...", file=sys.stderr)
-    with tempfile.TemporaryDirectory(prefix="ast_pilot_npm_") as cache_dir:
-        env = {**os.environ, "NPM_CONFIG_CACHE": cache_dir}
-        try:
-            result = subprocess.run(
-                ["npm", "install", "--package-lock-only", "--legacy-peer-deps", "--ignore-scripts"],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env,
-            )
-            if result.returncode == 0:
-                print(f"  [node] Generated package-lock.json", file=sys.stderr)
-                return (root / "package-lock.json").exists()
-            msg = result.stderr.strip()[:200] if result.stderr else "unknown error"
-            print(f"  [node] Failed to generate package-lock.json: {msg}", file=sys.stderr)
-            return False
-        except FileNotFoundError:
-            print(f"  [node] npm not found on PATH, cannot generate package-lock.json", file=sys.stderr)
-            return False
-        except subprocess.TimeoutExpired:
-            print(f"  [node] Timed out generating package-lock.json", file=sys.stderr)
-            return False
+        return None
+    print(f"  [node] No package-lock.json found, generating in a temp dir (source repo will not be modified)…", file=sys.stderr)
+    with tempfile.TemporaryDirectory(prefix="ast_pilot_lockgen_") as work_str:
+        work = Path(work_str)
+        shutil.copy2(pkg_json, work / "package.json")
+        npmrc = root / ".npmrc"
+        if npmrc.exists():
+            shutil.copy2(npmrc, work / ".npmrc")
+        with tempfile.TemporaryDirectory(prefix="ast_pilot_npm_cache_") as cache_dir:
+            env = {**os.environ, "NPM_CONFIG_CACHE": cache_dir}
+            try:
+                result = subprocess.run(
+                    ["npm", "install", "--package-lock-only", "--legacy-peer-deps", "--ignore-scripts"],
+                    cwd=str(work),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+            except FileNotFoundError:
+                print(f"  [node] npm not found on PATH, cannot generate package-lock.json", file=sys.stderr)
+                return None
+            except subprocess.TimeoutExpired:
+                print(f"  [node] Timed out generating package-lock.json", file=sys.stderr)
+                return None
+            if result.returncode != 0:
+                msg = result.stderr.strip()[:200] if result.stderr else "unknown error"
+                print(f"  [node] Failed to generate package-lock.json: {msg}", file=sys.stderr)
+                return None
+        generated = work / "package-lock.json"
+        if not generated.exists():
+            return None
+        print(f"  [node] Generated package-lock.json (source repo unchanged)", file=sys.stderr)
+        return generated.read_text(encoding="utf-8")
 
 
 def _find_first(root: Path, names: tuple[str, ...]) -> Path | None:

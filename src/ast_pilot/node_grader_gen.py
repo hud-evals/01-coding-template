@@ -64,10 +64,21 @@ def generate_graders(
     repo_root = ctx.root
 
     config_paths: list[Path] = []
-    for name in ("package.json", "package-lock.json", ".npmrc"):
+    for name in ("package.json", ".npmrc"):
         candidate = repo_root / name
         if candidate.exists():
             config_paths.append(candidate)
+
+    extra_config_files: dict[str, str] = {}
+    on_disk_lockfile = repo_root / "package-lock.json"
+    if on_disk_lockfile.exists():
+        config_paths.append(on_disk_lockfile)
+    elif ctx.generated_lockfile_content is not None:
+        # Auto-generated in a temp dir to avoid mutating the source repo.
+        # Inline it into the manifest by basename so the staged task still
+        # gets a deterministic install at grading time.
+        extra_config_files["package-lock.json"] = ctx.generated_lockfile_content
+
     if ctx.tsconfig_path and ctx.tsconfig_path.exists():
         config_paths.append(ctx.tsconfig_path)
     if ctx.vitest_config_path and ctx.vitest_config_path.exists():
@@ -79,6 +90,7 @@ def generate_graders(
         source_paths=resolved_sources,
         test_paths=resolved_tests,
         config_paths=config_paths,
+        extra_config_files=extra_config_files or None,
     )
 
     dep_issues = audit_bare_imports(manifest, ctx.package_json)

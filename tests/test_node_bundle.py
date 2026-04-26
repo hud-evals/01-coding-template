@@ -409,5 +409,67 @@ class AuditBareImportsTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+class PathContainmentTests(unittest.TestCase):
+    """Regression: ``_repo_relative`` used to fall back to the absolute path
+    when the input was outside the detected repo root. Manifest entries flow
+    into ``golden_dir / rel`` writes, and ``pathlib`` happily discards the
+    destination prefix when it is ``/`` joined with an absolute path — so a
+    rogue source file could escape the task output directory entirely."""
+
+    def test_build_manifest_rejects_source_path_outside_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir, tempfile.TemporaryDirectory() as outside:
+            repo = Path(repo_dir)
+            stray = Path(outside) / "lib.ts"
+            stray.write_text("export const x = 1;", encoding="utf-8")
+            (repo / "package.json").write_text('{"name": "demo"}', encoding="utf-8")
+
+            with self.assertRaises(ValueError) as ctx:
+                build_manifest(
+                    slug="demo",
+                    repo_root=repo,
+                    source_paths=[stray],
+                    test_paths=[],
+                    config_paths=[],
+                )
+            self.assertIn("outside the Node project root", str(ctx.exception))
+
+    def test_build_manifest_rejects_test_path_outside_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir, tempfile.TemporaryDirectory() as outside:
+            repo = Path(repo_dir)
+            (repo / "src").mkdir()
+            src = repo / "src" / "lib.ts"
+            src.write_text("export const x = 1;", encoding="utf-8")
+
+            stray_test = Path(outside) / "evil.test.ts"
+            stray_test.write_text("// outside repo", encoding="utf-8")
+
+            with self.assertRaises(ValueError) as ctx:
+                build_manifest(
+                    slug="demo",
+                    repo_root=repo,
+                    source_paths=[src],
+                    test_paths=[stray_test],
+                    config_paths=[],
+                )
+            self.assertIn("outside the Node project root", str(ctx.exception))
+
+    def test_extra_config_files_rejects_path_separator(self) -> None:
+        """``extra_config_files`` keys must be plain filenames so the auto-lockfile
+        injection cannot be tricked into writing under a sibling directory."""
+        with tempfile.TemporaryDirectory() as repo_dir:
+            repo = Path(repo_dir)
+            (repo / "package.json").write_text('{"name": "demo"}', encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                build_manifest(
+                    slug="demo",
+                    repo_root=repo,
+                    source_paths=[],
+                    test_paths=[],
+                    config_paths=[],
+                    extra_config_files={"../package-lock.json": "{}"},
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,47 @@ class NodeGraderGenTests(unittest.TestCase):
             self.assertIn("tasks/demo/config/package-lock.json", files)
             self.assertIn("tasks/demo/config/tsconfig.json", files)
 
+    def test_node_grader_rejects_unsupported_ctx(self) -> None:
+        """Regression: previously the generator computed ``ctx.is_supported``
+        and ignored it, silently shipping half-baked bundles for unsupported
+        repos (workspaces, missing lockfile, non-vitest, path aliases). The
+        generator must now hard-fail with the unsupported reasons before
+        writing anything to the output directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Workspaces are explicitly unsupported by detect_node_project.
+            pkg = {
+                "name": "monorepo",
+                "version": "1.0.0",
+                "type": "module",
+                "workspaces": ["packages/*"],
+                "devDependencies": {"vitest": "^1.0.0"},
+            }
+            (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+            lock = {"name": "monorepo", "lockfileVersion": 3, "packages": {}}
+            (root / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+            (root / "src").mkdir()
+            src = root / "src" / "lib.ts"
+            src.write_text("export const x = 1;\n", encoding="utf-8")
+
+            ev = Evidence(project_name="monorepo", language="typescript")
+            ev.source_files = [ModuleInfo(path=str(src), module_name="lib")]
+
+            output_dir = root / "output"
+            with self.assertRaises(ValueError) as ctx:
+                generate_graders(
+                    ev,
+                    output_dir=output_dir,
+                    prompt_md="# monorepo\n",
+                    source_paths=[src],
+                    test_paths=[],
+                )
+            self.assertIn("Monorepo workspaces", str(ctx.exception))
+            # Output directory may have been created by mkdir, but the task
+            # bundle must NOT exist — generation aborted before writing files.
+            self.assertFalse((output_dir / "tasks" / "monorepo" / "task.py").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
