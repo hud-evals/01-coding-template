@@ -54,6 +54,13 @@ def generate_graders(
         require_lockfile=True,
         auto_generate_lockfile=True,
     )
+    if not ctx.is_supported:
+        reasons = "\n  - ".join(ctx.unsupported_reasons)
+        raise ValueError(
+            "Node project is not supported by the TS generator yet:\n  - "
+            f"{reasons}\n"
+            "Resolve the listed issues (or split the source repo) before regenerating."
+        )
     repo_root = ctx.root
 
     config_paths: list[Path] = []

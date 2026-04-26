@@ -15,6 +15,18 @@ from ast_pilot.evidence import Evidence, ModuleInfo, TestEvidence as EvidenceTes
 from ast_pilot.validator import ValidationIssue, ValidationResult
 
 
+def _fake_render_start_md(ev, output_path, use_llm=True, **kwargs):
+    """Match the real ``render_start_md`` contract: write prompt.md to disk
+    and return the same content. ``cmd_run`` re-reads prompt.md from disk
+    after the validation/fix loop, so a mock that only returns a string
+    silently breaks tests."""
+    content = "# demo-task\n"
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return content
+
+
 class CliTests(unittest.TestCase):
     def test_promote_generated_task_copies_slugged_bundle_into_package_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -62,7 +74,7 @@ class CliTests(unittest.TestCase):
 
             with (
                 patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                 patch("ast_pilot.validator.validate", return_value=validation),
                 patch("ast_pilot.grader_gen.generate_graders") as generate_graders,
             ):
@@ -99,7 +111,7 @@ class CliTests(unittest.TestCase):
             try:
                 with (
                     patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                    patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                     patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                     patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate_graders),
                 ):
@@ -216,7 +228,7 @@ class CliAlignmentTests(unittest.TestCase):
 
             with (
                 patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                 patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                 patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
                 patch("ast_pilot.cli._run_alignment_loop", return_value=blocking_review),
@@ -259,7 +271,7 @@ class CliAlignmentTests(unittest.TestCase):
             try:
                 with (
                     patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                    patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                     patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                     patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
                     patch("ast_pilot.cli._run_alignment_loop", return_value=AlignmentReview()),
@@ -300,7 +312,7 @@ class CliAlignmentTests(unittest.TestCase):
             try:
                 with (
                     patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                    patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                     patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                     patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
                     patch("ast_pilot.cli._run_alignment_loop") as mock_loop,
@@ -341,7 +353,7 @@ class CliAlignmentTests(unittest.TestCase):
             try:
                 with (
                     patch("ast_pilot.scanner.scan", return_value=Evidence(project_name="demo-task")),
-                    patch("ast_pilot.spec_renderer.render_start_md", return_value="# demo-task\n"),
+                    patch("ast_pilot.spec_renderer.render_start_md", side_effect=_fake_render_start_md),
                     patch("ast_pilot.validator.validate", return_value=ValidationResult()),
                     patch("ast_pilot.grader_gen.generate_graders", side_effect=fake_generate),
                     patch("ast_pilot.cli._run_alignment_loop") as mock_loop,
