@@ -127,11 +127,11 @@ Rules for this pass:
   covers it. If an agent would have to guess, it's a real issue.
 - Confirm the safe_to_fix classification
 
-Each confirmed issue must keep its ``failure_demo`` object — the \
-downstream parser drops any issue whose demo has matching \
-``test_expects`` and ``agent_following_prompt_produces``. If you find \
-yourself unable to write two materially different strings for those \
-fields on a candidate issue, drop the candidate instead of confirming it.
+Each confirmed issue must keep its ``failure_demo`` object. The \
+downstream parser drops any candidate whose demo has matching \
+``test_expects`` and ``agent_following_prompt_produces``, or has either \
+field empty — that is the structural definition of "not a real issue" \
+the pipeline relies on.
 
 Output strict JSON only with the same schema:
 {"issues": [...]}
@@ -692,27 +692,6 @@ def _forced_issues_from_failed_checks(literal_checks: list[dict]) -> list[dict]:
     return forced
 
 
-_SELF_ADMITTED_NON_ISSUE_MARKERS = (
-    "not a genuine issue",
-    "not a real issue",
-    "not an issue",
-    "false positive",
-    "does not represent a real",
-    "is already specified",
-    "is already documented",
-)
-
-
-def _is_self_admitted_non_issue(rationale: str) -> bool:
-    """Detect rationales whose text outright says the issue isn't real.
-
-    A small belt-and-suspenders backstop for the structural ``failure_demo``
-    cross-check below — useful for legacy responses that don't carry a demo.
-    """
-    lowered = rationale.lower()
-    return any(marker in lowered for marker in _SELF_ADMITTED_NON_ISSUE_MARKERS)
-
-
 def _normalize_demo_value(text: str) -> str:
     """Lowercase, collapse whitespace, strip surrounding quotes/punctuation
     so semantically-equal demo strings compare equal even if the LLM tweaks
@@ -751,20 +730,12 @@ def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
     for raw in raw_issues:
         if not isinstance(raw, dict):
             continue
-        rationale = str(raw.get("rationale", ""))
 
         is_non_issue, demo_reason = _failure_demo_is_non_issue(raw)
         if is_non_issue:
             _log(
                 "    [FILTERED non-issue] "
                 f"{str(raw.get('title', ''))[:100]} — {demo_reason}"
-            )
-            continue
-
-        if _is_self_admitted_non_issue(rationale):
-            _log(
-                "    [FILTERED non-issue] "
-                f"{str(raw.get('title', ''))[:100]} — rationale admits this isn't real"
             )
             continue
 
@@ -775,7 +746,7 @@ def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
                 title=str(raw.get("title", "")),
                 prompt_evidence=str(raw.get("prompt_evidence", "")),
                 grader_evidence=str(raw.get("grader_evidence", "")),
-                rationale=rationale,
+                rationale=str(raw.get("rationale", "")),
                 safe_to_fix=bool(raw.get("safe_to_fix", False)),
             ))
         except (TypeError, ValueError):
