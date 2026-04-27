@@ -102,6 +102,11 @@ class AlignmentLoopTests(unittest.TestCase):
             "grader_evidence": "...",
             "rationale": "Cannot fix safely.",
             "safe_to_fix": False,
+            "failure_demo": {
+                "test_input": "demo()",
+                "test_expects": "ok",
+                "agent_following_prompt_produces": "raise",
+            },
         }]})
         with tempfile.TemporaryDirectory() as tmpdir:
             task_dir = Path(tmpdir) / "task"
@@ -124,6 +129,11 @@ class AlignmentLoopTests(unittest.TestCase):
             "grader_evidence": "Test expects <b>",
             "rationale": "Need tag.",
             "safe_to_fix": True,
+            "failure_demo": {
+                "test_input": "render('hi')",
+                "test_expects": "<b>hi</b>",
+                "agent_following_prompt_produces": "**hi**",
+            },
         }]})
         clean_response = json.dumps({"issues": []})
 
@@ -166,6 +176,11 @@ class AlignmentLoopTests(unittest.TestCase):
             "grader_evidence": "...",
             "rationale": "...",
             "safe_to_fix": True,
+            "failure_demo": {
+                "test_input": "render('hi')",
+                "test_expects": "<b>hi</b>",
+                "agent_following_prompt_produces": "**hi**",
+            },
         }]})
 
         original_prompt = "# demo original\n"
