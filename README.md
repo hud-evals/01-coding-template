@@ -268,6 +268,8 @@ The alignment pass extracts every literal in the hidden tests' `assert <LIT> in 
 
 **`ModuleNotFoundError` during integration_test** — Usually a missing helper in `support/`, a missing dependency in `requirements.hidden.txt`, or a bad import rewrite. Check the failing import first.
 
+**`integration_test` returns `Reward: 0.000` and the trace shows a `KeyError`/`AttributeError` from an unset env var or undefined fixture** — Your test relies on a `conftest.py` autouse fixture (common in repos that isolate `$HOME`-style state, monkeypatch env vars, or reset plugin singletons per test). The generator does **not** bundle `conftest.py` today, so those fixtures don't activate at grading time. Two workarounds: pick a test file that doesn't depend on autouse fixtures (run `pytest --fixtures path/to/test.py` to see what it pulls in), or inline the fixture body into the test itself before regenerating — whatever is literally in the test file gets bundled verbatim.
+
 **Generation fails on unsupported internal modules** — Expected. Pick a simpler source module, trim the test surface, or set `AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS=1`.
 
 **Generation aborts with `alignment unavailable`** — The LLM reviewer returned nothing parseable on every retry; the generator refuses to ship a task with unknown coverage. Retry once the provider recovers, or pass `--allow-alignment-unavailable` if you need to ship anyway (the generated task will sync but reviewers should manually audit the prompt).
