@@ -63,8 +63,16 @@ def build_manifest(
     source_paths: list[Path],
     test_paths: list[Path],
     config_paths: list[Path],
+    extra_config_files: dict[str, str] | None = None,
 ) -> NodeBundleManifest:
-    """Build a bundle manifest with transitive local-import closure."""
+    """Build a bundle manifest with transitive local-import closure.
+
+    *extra_config_files* lets callers inject install-relevant config that does
+    not live on disk in *repo_root* — e.g. an auto-generated ``package-lock.json``
+    materialised in a temp dir. Keys are filenames (basename, no path prefix);
+    values are file contents. Use this whenever you would otherwise be tempted
+    to write a generated config back into the user's worktree.
+    """
     source_files: dict[str, str] = {}
     for p in source_paths:
         rel = _repo_relative(p, repo_root)
@@ -82,6 +90,14 @@ def build_manifest(
         rel = _repo_relative(p, repo_root)
         if p.exists():
             config_files[rel] = p.read_text(encoding="utf-8")
+
+    if extra_config_files:
+        for filename, content in extra_config_files.items():
+            if "/" in filename or "\\" in filename:
+                raise ValueError(
+                    f"extra_config_files keys must be plain filenames, got {filename!r}"
+                )
+            config_files[filename] = content
 
     all_known = set(source_files) | set(test_files) | set(config_files)
 
@@ -112,7 +128,7 @@ def build_manifest(
 
     _bundle_runtime_file_refs(repo_root, {**test_files, **support_files}, support_files, all_known)
 
-    fingerprint = _compute_install_fingerprint(repo_root, config_files)
+    fingerprint = _compute_install_fingerprint(config_files)
 
     return NodeBundleManifest(
         slug=slug,
@@ -199,10 +215,23 @@ def _bundle_runtime_file_refs(
 
 
 def _repo_relative(path: Path, root: Path) -> str:
+    """Return *path* as a posix string relative to *root*.
+
+    Raises :class:`ValueError` when *path* is outside *root*. Falling back to
+    an absolute path here was a footgun: the manifest entries flow into
+    ``golden_dir / rel`` / ``tests_dir / rel`` writes, and ``pathlib`` happily
+    discards the destination prefix when handed an absolute right-hand side,
+    letting a stray source file overwrite something outside the task bundle.
+    """
+    resolved = path.resolve()
+    root_resolved = root.resolve()
     try:
-        return str(path.resolve().relative_to(root.resolve()))
-    except ValueError:
-        return str(path.resolve())
+        return resolved.relative_to(root_resolved).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"{resolved} is outside the Node project root {root_resolved}; "
+            "refusing to bundle a path that would escape the task output directory."
+        ) from exc
 
 
 def _extract_local_specifiers(content: str) -> list[str]:
@@ -259,12 +288,18 @@ def _resolve_local_specifier(specifier: str, from_file: Path, repo_root: Path) -
     return None
 
 
-def _compute_install_fingerprint(repo_root: Path, config_files: dict[str, str]) -> str:
-    """Compute a fingerprint from install-relevant config files."""
+def _compute_install_fingerprint(config_files: dict[str, str]) -> str:
+    """Compute a fingerprint from install-relevant manifest entries.
+
+    Only ``package.json``, ``package-lock.json`` and ``.npmrc`` contribute,
+    matched by basename so an auto-generated lockfile injected via
+    ``extra_config_files`` fingerprints identically to one read from disk.
+    """
     h = hashlib.sha256()
-    for name in sorted(("package.json", "package-lock.json", ".npmrc")):
-        src = repo_root / name
-        if src.exists():
-            h.update(name.encode("utf-8"))
-            h.update(src.read_bytes())
+    for name in ("package.json", "package-lock.json", ".npmrc"):
+        for rel in sorted(config_files):
+            if Path(rel).name == name:
+                h.update(name.encode("utf-8"))
+                h.update(config_files[rel].encode("utf-8"))
+                break
     return h.hexdigest()[:16]

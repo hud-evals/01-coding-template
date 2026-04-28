@@ -77,6 +77,11 @@ class AlignmentFixerTSRegressionTests(unittest.TestCase):
             "grader_evidence": "...",
             "rationale": "...",
             "safe_to_fix": True,
+            "failure_demo": {
+                "test_input": "render('hi')",
+                "test_expects": "<b>hi</b>",
+                "agent_following_prompt_produces": "**hi**",
+            },
         }]})
         original_prompt = "# demo original\n"
 

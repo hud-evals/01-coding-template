@@ -78,7 +78,10 @@ class DetectNodeProjectTests(unittest.TestCase):
             self.assertFalse(ctx.is_supported)
             self.assertTrue(any("workspace" in r.lower() for r in ctx.unsupported_reasons))
 
-    def test_auto_generates_lockfile_when_missing(self) -> None:
+    def test_auto_generates_lockfile_in_temp_dir_without_touching_source_repo(self) -> None:
+        """The generator must NEVER mutate the user's worktree. The lockfile
+        content lives on the context as a string; the on-disk source repo
+        stays exactly as the user left it."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             src = self._make_supported_repo(root)
@@ -90,8 +93,15 @@ class DetectNodeProjectTests(unittest.TestCase):
                 require_lockfile=True,
                 auto_generate_lockfile=True,
             )
-            self.assertTrue((root / "package-lock.json").exists())
+            self.assertFalse(
+                (root / "package-lock.json").exists(),
+                "Auto-generated lockfile leaked into source repo",
+            )
             self.assertTrue(ctx.is_supported)
+            self.assertTrue(ctx.has_lockfile)
+            self.assertIsNotNone(ctx.generated_lockfile_content)
+            assert ctx.generated_lockfile_content is not None  # narrow for mypy
+            self.assertIn('"lockfileVersion"', ctx.generated_lockfile_content)
 
     def test_readonly_detection_does_not_generate_lockfile_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -47,6 +47,11 @@ class AlignmentReviewTests(unittest.TestCase):
             "grader_evidence": "Test asserts returns False",
             "rationale": "Implementation that follows prompt will fail grader.",
             "safe_to_fix": False,
+            "failure_demo": {
+                "test_input": "merge({'a': 1}, {'a': 1})",
+                "test_expects": "False",
+                "agent_following_prompt_produces": "raise ConflictError",
+            },
         }]})
         with tempfile.TemporaryDirectory() as tmpdir:
             task_dir = _make_task_dir(tmpdir)
@@ -65,6 +70,11 @@ class AlignmentReviewTests(unittest.TestCase):
             "grader_evidence": "Test expects <b> tag",
             "rationale": "Prompt should specify HTML tag.",
             "safe_to_fix": True,
+            "failure_demo": {
+                "test_input": "render('hi')",
+                "test_expects": "<b>hi</b>",
+                "agent_following_prompt_produces": "**hi**",
+            },
         }]})
         with tempfile.TemporaryDirectory() as tmpdir:
             task_dir = _make_task_dir(tmpdir)
@@ -105,7 +115,17 @@ class AlignmentReviewTests(unittest.TestCase):
         self.assertEqual(_parse_raw_issues_json("invalid"), [])
 
     def test_parse_issues_skips_non_dict_entries(self) -> None:
-        result = _parse_issues([42, "string", None, {"severity": "error", "title": "ok"}])
+        good = {
+            "severity": "error",
+            "title": "ok",
+            "rationale": "agent would mis-format the date column",
+            "failure_demo": {
+                "test_input": "datetime(2024, 1, 2)",
+                "test_expects": "2024-01-02",
+                "agent_following_prompt_produces": "Tue Jan  2 00:00:00 2024",
+            },
+        }
+        result = _parse_issues([42, "string", None, good])
         self.assertEqual(len(result.issues), 1)
         self.assertEqual(result.issues[0].title, "ok")
 
@@ -127,6 +147,71 @@ class AlignmentReviewTests(unittest.TestCase):
             (task_dir / "prompt.md").write_text("# demo\n", encoding="utf-8")
             result = review_task_alignment(task_dir)
         self.assertTrue(result.is_clean)
+
+    def test_parse_issues_filters_via_structural_failure_demo(self) -> None:
+        """An issue is real only when the reviewer can name two materially
+        different strings: what the test asserts vs what an agent following
+        only the prompt would produce. When those strings match (or one is
+        missing) the prompt is doing its job and there is no issue —
+        regardless of how the LLM phrased the rationale.
+
+        This is the higher-level fix for self-contradictory issues: instead
+        of pattern-matching rationale text, we check the LLM's own concrete
+        commitment. If the LLM cannot commit to a real failing example, the
+        ``severity: error`` flag is noise."""
+        cases = [
+            # No failure_demo at all — reviewer never made the failure concrete.
+            {
+                "severity": "error",
+                "category": "underspecified",
+                "title": "vague concern, no demo",
+                "rationale": "Prompt could be tighter about edge cases.",
+                "safe_to_fix": False,
+            },
+            # Demo present but expects == produces (case + whitespace + quote
+            # variants must still match for the structural check to be useful).
+            {
+                "severity": "error",
+                "category": "direct_contradiction",
+                "title": "expected matches predicted",
+                "rationale": "Subtle wording issue.",
+                "safe_to_fix": False,
+                "failure_demo": {
+                    "test_input": "is_truthy_value('yes')",
+                    "test_expects": "True",
+                    "agent_following_prompt_produces": "  TRUE  ",
+                },
+            },
+            # Demo present but one side is empty — reviewer wouldn't commit.
+            {
+                "severity": "error",
+                "category": "hidden_requirement",
+                "title": "empty produces side",
+                "rationale": "Test uses a fixture not mentioned by the prompt.",
+                "safe_to_fix": False,
+                "failure_demo": {
+                    "test_input": "monkeypatch.setenv('X', '1')",
+                    "test_expects": "True",
+                    "agent_following_prompt_produces": "",
+                },
+            },
+            # A REAL issue: produces materially differs from expects.
+            {
+                "severity": "error",
+                "category": "direct_contradiction",
+                "title": "real mismatch",
+                "rationale": "Prompt says hyphenated, test asserts underscored.",
+                "safe_to_fix": True,
+                "failure_demo": {
+                    "test_input": "slugify('Hello World')",
+                    "test_expects": "hello-world",
+                    "agent_following_prompt_produces": "hello_world",
+                },
+            },
+        ]
+        result = _parse_issues(cases)
+        titles = [i.title for i in result.issues]
+        self.assertEqual(titles, ["real mismatch"])
 
 
 if __name__ == "__main__":

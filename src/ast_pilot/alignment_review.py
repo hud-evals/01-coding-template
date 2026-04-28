@@ -84,6 +84,21 @@ without contradicting any existing explicit claims.
 Mark safe_to_fix=false for contradictions or cases where fixing would \
 require guessing intent.
 
+Every issue MUST include a ``failure_demo`` object proving an agent would \
+actually fail the hidden test. The downstream parser drops issues whose \
+demo shows the agent's predicted output matching the test's expected value, \
+so vague concerns are auto-filtered. Be concrete:
+
+  "failure_demo": {
+    "test_input": "<the exact input/setup the failing assertion uses>",
+    "test_expects": "<the exact value the test asserts, verbatim>",
+    "agent_following_prompt_produces": "<what an agent reading ONLY the prompt would actually output, made concrete from the prompt's rules>"
+  }
+
+If you cannot make ``test_expects`` and ``agent_following_prompt_produces`` \
+into two strings that differ, the prompt is doing its job and there is no \
+issue. Drop the entry instead of returning it.
+
 When an ASSERTED TEST LITERALS section is present, you MUST also populate a \
 ``literal_checks`` array. Each entry is the structured result of simulating \
 one asserted literal against the prompt's substitution rules. Fill every \
@@ -111,6 +126,12 @@ Rules for this pass:
 - Do NOT remove an issue just because the prompt "sort of" or "implicitly" \
   covers it. If an agent would have to guess, it's a real issue.
 - Confirm the safe_to_fix classification
+
+Each confirmed issue must keep its ``failure_demo`` object. The \
+downstream parser drops any candidate whose demo has matching \
+``test_expects`` and ``agent_following_prompt_produces``, or has either \
+field empty — that is the structural definition of "not a real issue" \
+the pipeline relies on.
 
 Output strict JSON only with the same schema:
 {"issues": [...]}
@@ -671,26 +692,37 @@ def _forced_issues_from_failed_checks(literal_checks: list[dict]) -> list[dict]:
     return forced
 
 
-_SELF_ADMITTED_NON_ISSUE_MARKERS = (
-    "not a genuine issue",
-    "not a real issue",
-    "not an issue",
-    "false positive",
-    "does not represent a real",
-    "is already specified",
-    "is already documented",
-)
+def _normalize_demo_value(text: str) -> str:
+    """Lowercase, collapse whitespace, strip surrounding quotes/punctuation
+    so semantically-equal demo strings compare equal even if the LLM tweaks
+    casing or wraps one side in quotes."""
+    lowered = " ".join(text.lower().split())
+    return lowered.strip(" \t\n\"'`.,;:")
 
 
-def _is_self_admitted_non_issue(rationale: str) -> bool:
-    """Detect issues whose rationale text admits they are not real.
+def _failure_demo_is_non_issue(raw: dict) -> tuple[bool, str]:
+    """Return ``(is_non_issue, reason)`` for the issue's ``failure_demo``.
 
-    Models sometimes return ``severity=error, safe_to_fix=false`` while the
-    rationale says ``"This is NOT a genuine issue"``. Without this filter those
-    self-contradictory entries block promotion with no one to fix them.
+    The reviewer must commit to two strings — what the test asserts vs what
+    an agent following only the prompt would produce. If those normalize to
+    the same value the prompt is doing its job and there's nothing to fix;
+    if either is empty the reviewer never made the failure concrete and we
+    can't trust the entry to be an issue. Everything else passes through.
     """
-    lowered = rationale.lower()
-    return any(marker in lowered for marker in _SELF_ADMITTED_NON_ISSUE_MARKERS)
+    demo = raw.get("failure_demo")
+    if not isinstance(demo, dict):
+        return True, "missing failure_demo (no concrete failure described)"
+    expects_raw = demo.get("test_expects", "")
+    produces_raw = demo.get("agent_following_prompt_produces", "")
+    if not isinstance(expects_raw, str) or not isinstance(produces_raw, str):
+        return True, "failure_demo fields are not strings"
+    expects = _normalize_demo_value(expects_raw)
+    produces = _normalize_demo_value(produces_raw)
+    if not expects or not produces:
+        return True, "failure_demo strings are empty"
+    if expects == produces:
+        return True, "failure_demo shows the agent's output already matches the test"
+    return False, ""
 
 
 def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
@@ -698,13 +730,15 @@ def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
     for raw in raw_issues:
         if not isinstance(raw, dict):
             continue
-        rationale = str(raw.get("rationale", ""))
-        if _is_self_admitted_non_issue(rationale):
+
+        is_non_issue, demo_reason = _failure_demo_is_non_issue(raw)
+        if is_non_issue:
             _log(
                 "    [FILTERED non-issue] "
-                f"{raw.get('title', '')[:100]} — rationale admits this isn't real"
+                f"{str(raw.get('title', ''))[:100]} — {demo_reason}"
             )
             continue
+
         try:
             issues.append(AlignmentIssue(
                 severity=str(raw.get("severity", "error")),
@@ -712,7 +746,7 @@ def _parse_issues(raw_issues: list[dict]) -> AlignmentReview:
                 title=str(raw.get("title", "")),
                 prompt_evidence=str(raw.get("prompt_evidence", "")),
                 grader_evidence=str(raw.get("grader_evidence", "")),
-                rationale=rationale,
+                rationale=str(raw.get("rationale", "")),
                 safe_to_fix=bool(raw.get("safe_to_fix", False)),
             ))
         except (TypeError, ValueError):

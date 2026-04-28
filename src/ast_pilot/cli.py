@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -11,6 +12,23 @@ from pathlib import Path
 
 from .shared_utils import pkg_name as _pkg_name, slug as _slug
 from .tui import ui
+
+ALLOW_ALIGNMENT_UNAVAILABLE_ENV = "AST_PILOT_ALLOW_ALIGNMENT_UNAVAILABLE"
+
+
+def _allow_alignment_unavailable(args: argparse.Namespace) -> bool:
+    """``True`` when the user has explicitly opted into shipping a task whose
+    alignment review never returned a parseable response.
+
+    Defaults to ``False`` so a silent reviewer outage cannot promote a task
+    with unknown coverage. Either ``--allow-alignment-unavailable`` or the
+    ``AST_PILOT_ALLOW_ALIGNMENT_UNAVAILABLE`` env var (set to a truthy value)
+    flips it on.
+    """
+    if getattr(args, "allow_alignment_unavailable", False):
+        return True
+    raw = os.environ.get(ALLOW_ALIGNMENT_UNAVAILABLE_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _resolve_language(args: argparse.Namespace) -> str:
@@ -130,6 +148,14 @@ def cmd_bundle(args: argparse.Namespace) -> None:
                 )
                 for name in alignment.unavailable_tests:
                     print(f"    - {name}")
+                if not _allow_alignment_unavailable(args):
+                    print(
+                        f"\nRefusing to promote a task whose alignment review failed. Set "
+                        f"--allow-alignment-unavailable or {ALLOW_ALIGNMENT_UNAVAILABLE_ENV}=1 "
+                        "to ship anyway (coverage will be unknown)."
+                    )
+                    _print_alignment_verdict(alignment)
+                    raise SystemExit(2)
             elif alignment.is_clean:
                 print("  Alignment: PASSED (no issues)")
             else:
@@ -337,7 +363,19 @@ def cmd_run(args: argparse.Namespace) -> None:
                     )
                     for name in alignment.unavailable_tests:
                         console.detail(name)
-                    p.set_detail("unavailable")
+                    if not _allow_alignment_unavailable(args):
+                        p.error("refusing to promote — alignment unknown")
+                        console.detail(
+                            f"set --allow-alignment-unavailable or "
+                            f"{ALLOW_ALIGNMENT_UNAVAILABLE_ENV}=1 to ship anyway"
+                        )
+                        if alignment.confidence:
+                            alignment_extras.append(("conf", alignment.confidence))
+                        if alignment.verdict:
+                            alignment_extras.append(("note", alignment.verdict))
+                        p.set_detail("unavailable")
+                        raise SystemExit(2)
+                    p.set_detail("unavailable (allowed)")
                 elif alignment.is_clean:
                     p.success("no issues")
                     p.set_detail("clean")
@@ -476,6 +514,15 @@ def main() -> None:
     p_bundle.add_argument("--no-llm", action="store_true", help="Skip LLM calls")
     p_bundle.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
     p_bundle.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
+    p_bundle.add_argument(
+        "--allow-alignment-unavailable",
+        action="store_true",
+        help=(
+            "Promote even when the alignment review never returned a parseable "
+            f"response. Equivalent to {ALLOW_ALIGNMENT_UNAVAILABLE_ENV}=1. "
+            "Coverage will be unknown; only use when the LLM provider is degraded."
+        ),
+    )
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_run = sub.add_parser("run", help="Full pipeline: scan -> spec -> bundle")
@@ -487,6 +534,15 @@ def main() -> None:
     p_run.add_argument("--no-llm", action="store_true", help="Skip LLM, use deterministic rendering")
     p_run.add_argument("--no-alignment-autofix", action="store_true", help="Skip post-bundle alignment review/fix")
     p_run.add_argument("--alignment-max-rounds", type=int, default=2, help="Max alignment fix rounds (default: 2)")
+    p_run.add_argument(
+        "--allow-alignment-unavailable",
+        action="store_true",
+        help=(
+            "Promote even when the alignment review never returned a parseable "
+            f"response. Equivalent to {ALLOW_ALIGNMENT_UNAVAILABLE_ENV}=1. "
+            "Coverage will be unknown; only use when the LLM provider is degraded."
+        ),
+    )
     p_run.add_argument("--plain", action="store_true", help="Disable the rich TUI — emit plain, uncoloured text (CI-friendly). Also honoured via AST_PILOT_PLAIN=1.")
     p_run.add_argument("--language", help="Source language (python|typescript). Auto-inferred from file extensions when omitted.")
     p_run.set_defaults(func=cmd_run)
