@@ -218,8 +218,12 @@ class GraderGenTests(unittest.TestCase):
             self.assertNotIn("mario-claire", task_py)
             # Generated task.py looks up its env name from .hud/config.json
             # via resolve_env_name — no task_bootstrap, no .env file, no
-            # HUD_ENV_NAME environment variable.
-            self.assertIn("Environment(resolve_env_name(__file__))", task_py)
+            # HUD_ENV_NAME environment variable. Emitted as a dict so the
+            # Task.env validator's auto-connect_hub fires on `hud eval .`
+            # (local-file load); the Environment-instance shape skips
+            # connect_hub and breaks local-file evaluation.
+            self.assertIn('env={"name": resolve_env_name(__file__)}', task_py)
+            self.assertNotIn("Environment(resolve_env_name(__file__))", task_py)
             self.assertNotIn("connect_hub", task_py)
             self.assertNotIn("task_bootstrap", task_py)
             self.assertNotIn("HUD_ENV_NAME", task_py)
@@ -244,7 +248,10 @@ class GraderGenTests(unittest.TestCase):
 
             generated_task_dir = output_dir / "tasks" / "target-task"
             module = _load_generated_task_module(generated_task_dir)
-            self.assertEqual(module.task.env.name, "target-env")
+            # task.env is a dict (FakeTask doesn't run pydantic validation);
+            # the real Task validator turns this into an Environment with
+            # connect_hub bound to the same name.
+            self.assertEqual(module.task.env["name"], "target-env")
             self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
 
             args = module.task.args

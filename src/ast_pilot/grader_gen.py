@@ -550,7 +550,6 @@ def _generate_task_py(
     lines = [
         f'"""Task: build {ev.project_name} from scratch."""',
         "",
-        "from hud import Environment",
         "from hud.eval.task import Task",
         "",
         "from tasks._helpers import (",
@@ -565,7 +564,13 @@ def _generate_task_py(
         'SCENARIO_ID = "ast-pilot:coding-task-v2"',
         "",
         "task = Task(",
-        "    env=Environment(resolve_env_name(__file__)),",
+        # Pass env as a dict, NOT as Environment(...). The Task.env validator's
+        # dict-path calls `connect_hub(name)` automatically; the Environment-instance
+        # path does not, which breaks `hud eval .` (local task.py load) because
+        # the env has no remote connection and routing falls back to a broken
+        # local-render path. Dict-form is safe for both local-file and
+        # synced-taskset eval flows.
+        '    env={"name": resolve_env_name(__file__)},',
         "    scenario=SCENARIO_ID,",
         "    args={",
         '        "prompt": load_prompt(__file__),',

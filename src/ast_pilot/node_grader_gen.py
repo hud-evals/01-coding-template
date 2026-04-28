@@ -170,7 +170,6 @@ def _generate_task_py(
     lines = [
         f'"""Task: build {ev.project_name} (TypeScript) from scratch."""',
         "",
-        "from hud import Environment",
         "from hud.eval.task import Task",
         "",
         "from tasks._helpers import (",
@@ -185,7 +184,9 @@ def _generate_task_py(
         'SCENARIO_ID = "ast-pilot:coding-task-v2"',
         "",
         "task = Task(",
-        "    env=Environment(resolve_env_name(__file__)),",
+        # Dict-form env; see grader_gen.py for why (Task.env validator only
+        # auto-calls connect_hub on the dict path, not the Environment-instance path).
+        '    env={"name": resolve_env_name(__file__)},',
         "    scenario=SCENARIO_ID,",
         "    args={",
         '        "prompt": load_prompt(__file__),',
