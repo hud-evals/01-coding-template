@@ -81,11 +81,14 @@ FROM setup AS hud_analysis_base
 
 RUN pip install uv --break-system-packages
 
-COPY ./pyproject.toml /mcp_server/pyproject.toml
+COPY ./pyproject.toml ./uv.lock /mcp_server/
 WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
-RUN uv venv && . .venv/bin/activate && uv sync --no-install-project --extra dev && uv pip install -e .
+# --frozen enforces the committed uv.lock — no resolver drift between builds, no
+# surprise transitive bumps (e.g. fastmcp moving past the hud-python API surface).
+# If pyproject changes without re-locking, the build fails on purpose.
+RUN uv venv && . .venv/bin/activate && uv sync --frozen --no-install-project && uv pip install -e .
 ENV PYTHONPATH=/mcp_server
 ENV PATH=/mcp_server/.venv/bin:$PATH
 

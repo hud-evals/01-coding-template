@@ -11,7 +11,6 @@ venv
 *.egg-info
 dist
 build
-uv.lock
 README.md
 HANDOFF.md
 USAGE.md

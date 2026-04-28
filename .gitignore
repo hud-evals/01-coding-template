@@ -11,7 +11,6 @@ venv/
 .env
 .env.*
 !.env.example
-uv.lock
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
@@ -22,6 +21,5 @@ hud.lock.yaml
 output/
 ast_test/
 evidence*.json
-*.lock
 
 node_modules/
