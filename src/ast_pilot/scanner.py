@@ -25,6 +25,35 @@ except ImportError:  # pragma: no cover - Python 3.10 fallback
     tomllib = None
 
 
+def _expand_py_paths(paths: list[str | Path] | None) -> list[Path]:
+    """Expand a mixed list of files and directories to a flat list of ``.py`` files.
+
+    Directories are walked recursively (`rglob("*.py")`); individual ``.py`` files
+    pass through unchanged. Non-existent paths and non-Python files are dropped
+    silently — same posture as ``_scan_module``'s pre-existing guard, but applied
+    before the read so callers passing a directory don't either crash with
+    ``IsADirectoryError`` (test path) or get silently skipped (source path).
+    """
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for raw in paths or []:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*.py")):
+                resolved = child.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    out.append(child)
+        elif path.suffix == ".py":
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(path)
+    return out
+
+
 def scan(
     source_paths: list[str | Path],
     test_paths: list[str | Path] | None = None,
@@ -32,6 +61,9 @@ def scan(
     readme_path: str | Path | None = None,
 ) -> Evidence:
     """Scan source files, optional test files, and docs into an Evidence store."""
+
+    source_paths = _expand_py_paths(source_paths)
+    test_paths = _expand_py_paths(test_paths)
 
     ev = Evidence(project_name=project_name)
     ev.python_version = _detect_python_version(source_paths)
