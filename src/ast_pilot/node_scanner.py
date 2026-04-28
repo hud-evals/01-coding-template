@@ -26,6 +26,42 @@ from .node_repo_support import collect_node_dependencies, detect_node_project
 _SCANNER_SCRIPT = Path(__file__).with_name("scan_node.mjs")
 
 
+_TS_SOURCE_EXTENSIONS: tuple[str, ...] = (".ts", ".tsx", ".mts", ".cts")
+_TS_TEST_EXTENSIONS: tuple[str, ...] = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
+
+
+def _expand_node_paths(paths: list[str | Path] | None, extensions: tuple[str, ...]) -> list[Path]:
+    """Expand mixed files-and-directories to a flat list of source files.
+
+    Directories are walked recursively; node_modules/dist/build subtrees are
+    pruned (they're never task input). Individual files pass through if they
+    match an allowed extension.
+    """
+    skip_dirs = {"node_modules", "dist", "build", ".git", ".next", ".nuxt", ".turbo"}
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for raw in paths or []:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if not child.is_file() or child.suffix not in extensions:
+                    continue
+                if any(part in skip_dirs for part in child.parts):
+                    continue
+                resolved = child.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    out.append(child)
+        elif path.suffix in extensions:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(path)
+    return out
+
+
 def scan_typescript(
     source_paths: list[str | Path],
     test_paths: list[str | Path] | None = None,
@@ -33,6 +69,9 @@ def scan_typescript(
     readme_path: str | Path | None = None,
 ) -> Evidence:
     """Scan TypeScript source files and optional test files into an Evidence store."""
+
+    source_paths = _expand_node_paths(source_paths, _TS_SOURCE_EXTENSIONS)
+    test_paths = _expand_node_paths(test_paths, _TS_TEST_EXTENSIONS)
 
     resolved_sources = [str(Path(p).resolve()) for p in source_paths]
     resolved_tests = [str(Path(p).resolve()) for p in (test_paths or [])]

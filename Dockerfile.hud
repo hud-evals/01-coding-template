@@ -81,11 +81,14 @@ FROM setup AS hud_analysis_base
 
 RUN pip install uv --break-system-packages
 
-COPY ./pyproject.toml /mcp_server/pyproject.toml
+COPY ./pyproject.toml /mcp_server/
 WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
-RUN uv venv && . .venv/bin/activate && uv sync --no-install-project --extra dev && uv pip install -e .
+# Resolves within the version range pinned in pyproject.toml (no committed
+# lockfile by design — the version pin is the safety net, lockfile noise
+# isn't worth the contributor friction for a template repo).
+RUN uv venv && . .venv/bin/activate && uv sync --no-install-project && uv pip install -e .
 ENV PYTHONPATH=/mcp_server
 ENV PATH=/mcp_server/.venv/bin:$PATH
 
