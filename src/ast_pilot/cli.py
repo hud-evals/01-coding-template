@@ -176,20 +176,42 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     language = _resolve_language(args)
 
-    source_paths = [Path(p) for p in args.sources]
-    test_paths = [Path(p) for p in args.tests] if args.tests else None
+    raw_source_paths = [Path(p) for p in args.sources]
+    raw_test_paths = [Path(p) for p in args.tests] if args.tests else None
     readme = Path(args.readme) if args.readme else None
     out_dir, cleanup_after_success = _prepare_bundle_root(args.output, args.name)
     use_llm = not args.no_llm
 
     if language == "typescript":
         from .node_grader_gen import generate_graders
-        from .node_scanner import scan_typescript as scan
+        from .node_scanner import (
+            _TS_SOURCE_EXTENSIONS,
+            _TS_TEST_EXTENSIONS,
+            _expand_node_paths,
+            scan_typescript as scan,
+        )
         from .node_spec_renderer import render_start_md
+
+        source_paths = _expand_node_paths(raw_source_paths, _TS_SOURCE_EXTENSIONS)
+        test_paths = (
+            _expand_node_paths(raw_test_paths, _TS_TEST_EXTENSIONS)
+            if raw_test_paths
+            else None
+        )
     else:
         from .grader_gen import generate_graders
-        from .scanner import scan
+        from .scanner import _expand_py_paths, scan
         from .spec_renderer import render_start_md
+
+        source_paths = _expand_py_paths(raw_source_paths)
+        test_paths = _expand_py_paths(raw_test_paths) if raw_test_paths else None
+
+    # Expansion at the CLI boundary means scanner AND grader_gen both receive
+    # a flat list of files. Otherwise the scanner sees expanded paths (its own
+    # internal helper kicked in) but generate_graders receives raw directories
+    # and crashes inside _write_golden_files when it does Path.read_text() on
+    # a dir. Sub-agent verification (#2) caught this on multi-package source
+    # trees — fixed in 2026-04-29.
 
     if getattr(args, "plain", False):
         from .tui import reset_ui
