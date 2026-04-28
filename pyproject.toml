@@ -8,8 +8,7 @@ dependencies = [
     # Pinned to a tested range. Floor is the version we built against; ceiling caps
     # at the next minor so transitive bumps (fastmcp, mcp) can't silently change the
     # Environment / scenario API. Bump only when integration_test passes against the
-    # new version on at least one Python and one TypeScript task. Then re-run
-    # `uv lock` and commit the updated uv.lock alongside.
+    # new version on at least one Python and one TypeScript task.
     "hud-python[agents]>=0.5.35,<0.6",
     "rubric>=1.3,<2",
     "rich>=13.0",

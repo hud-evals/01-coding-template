@@ -259,8 +259,7 @@ The alignment pass extracts every literal in the hidden tests' `assert <LIT> in 
 ├── cli.py               # MCP server entry point
 ├── .hud/config.json     # written by `hud deploy`; records registryName for this env
 ├── Dockerfile.hud       # Ubuntu + Python + Node 20 runtime
-├── pyproject.toml       # hud-python pin + dev deps
-└── uv.lock              # locked version tree — `uv sync --frozen` uses it at deploy time
+└── pyproject.toml       # hud-python pin + dev deps
 ```
 
 ## Troubleshooting
