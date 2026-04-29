@@ -255,7 +255,10 @@ class GraderGenTests(unittest.TestCase):
             self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
 
             args = module.task.args
-            self.assertEqual(sorted(args.keys()), ["graders", "hidden_requirements", "prompt", "support"])
+            self.assertEqual(
+                sorted(args.keys()),
+                ["graders", "hidden_requirements", "prompt", "support", "support_binary"],
+            )
             self.assertIn("# target-task", args["prompt"])
             self.assertEqual(len(args["graders"]), 1)
             grader = args["graders"][0]

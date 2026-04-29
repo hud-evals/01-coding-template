@@ -80,6 +80,67 @@ class LoadSupportTests(unittest.TestCase):
             payload = load_support(str(task_dir / "task.py"))
             self.assertEqual(json.loads(json.dumps(payload)), payload)
 
+    def test_load_support_binary_returns_base64_for_binary_files(self) -> None:
+        """Counterpart to load_support: binary files (sqlite, images, pickles)
+        get base64-encoded so they survive JSON transport in Task.args without
+        the UTF-8-replace inflation that corrupted the bytes."""
+        from tasks._helpers import load_support_binary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            support = task_dir / "support"
+            support.mkdir()
+            (support / "good.py").write_text("def fn(): pass\n", encoding="utf-8")
+            png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            (support / "image.png").write_bytes(png_bytes)
+
+            text = load_support_binary(str(task_dir / "task.py"))
+            self.assertEqual(set(text), {"image.png"})
+            decoded = base64.b64decode(text["image.png"])
+            self.assertEqual(decoded, png_bytes)
+
+    def test_load_support_round_trip_preserves_binary_bytes(self) -> None:
+        """End-to-end: a sqlite database staged through the full pipeline
+        (bundler → load_support_binary → base64 → decode → write_bytes) must
+        be byte-identical to the original. Regression for the read_text /
+        errors='replace' inflation that produced "database disk image is
+        malformed" at grader time."""
+        import sqlite3
+
+        from tasks._helpers import load_support_binary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "data.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+            conn.execute("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')")
+            conn.commit()
+            conn.close()
+            original_bytes = db_path.read_bytes()
+
+            task_dir = Path(tmp) / "task"
+            task_dir.mkdir()
+            support = task_dir / "support"
+            support.mkdir()
+            staged = support / "fixtures" / "data.db"
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(original_bytes)
+
+            payload = load_support_binary(str(task_dir / "task.py"))
+            decoded = base64.b64decode(payload["fixtures/data.db"])
+            self.assertEqual(decoded, original_bytes)
+
+            # Re-stage to a fake workspace and re-open the sqlite db.
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            for rel, encoded in payload.items():
+                dst = workspace / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(base64.b64decode(encoded))
+            rows = list(sqlite3.connect(workspace / "fixtures" / "data.db").execute("SELECT * FROM t"))
+            self.assertEqual(rows, [(1, "alice"), (2, "bob")])
+
     def test_walk_tree_skips_binary_files_instead_of_crashing(self) -> None:
         """Regression: _walk_tree used strict UTF-8 read on every file under
         support/, so a stray .pyc / image / pickle would raise

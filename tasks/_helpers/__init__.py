@@ -56,9 +56,21 @@ def load_support(task_file: str) -> dict[str, str]:
 
     Returns an empty dict if the directory does not exist. Walks recursively and
     sorts keys so the payload is stable across reruns (easier to diff / dedupe
-    sync uploads).
+    sync uploads). Files that aren't valid UTF-8 are surfaced via
+    :func:`load_support_binary` instead.
     """
     return _walk_tree(Path(task_file).parent / "support")
+
+
+def load_support_binary(task_file: str) -> dict[str, str]:
+    """Return ``{repo-relative-path: base64-encoded-bytes}`` for binary support files.
+
+    Counterpart to :func:`load_support` for non-UTF-8 assets (sqlite databases,
+    images, pickles, etc.). Empty dict when the support tree contains only
+    text. The scenario decodes these and writes them as bytes alongside the
+    text files.
+    """
+    return _walk_tree_binary(Path(task_file).parent / "support")
 
 
 def load_golden(task_file: str) -> dict[str, str]:
@@ -235,8 +247,27 @@ def _walk_tree(root: Path) -> dict[str, str]:
         try:
             result[rel] = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            # Stray binary (a leftover .pyc, a vendor image asset etc.) —
-            # the bundler's text contract doesn't carry it; skip rather
-            # than abort task import for the whole bundle.
+            # Binary assets (sqlite, images, pickles) are surfaced by
+            # _walk_tree_binary instead. Stray binaries that the bundler
+            # didn't track also fall through here without aborting task load.
             continue
+    return result
+
+
+def _walk_tree_binary(root: Path) -> dict[str, str]:
+    if not root.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            rel = path.relative_to(root).as_posix()
+            result[rel] = base64.b64encode(raw).decode("ascii")
     return result

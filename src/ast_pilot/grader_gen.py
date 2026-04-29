@@ -451,11 +451,19 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
 
     for rel_path, absolute_path in source_ctx.bundled_assets:
         try:
-            content = absolute_path.read_text(encoding="utf-8", errors="replace")
+            raw = absolute_path.read_bytes()
         except OSError:
             continue
         destination = paths.support_dir / rel_path
-        _write(destination, content)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # Binary asset (sqlite db, image, pickle) — bytes are now on
+            # disk verbatim. Skip the text manifest entry; the runtime
+            # picks it up via load_support_binary.
+            continue
         files[f"tasks/{paths.slug}/support/{rel_path}"] = content
 
     return files
@@ -581,6 +589,7 @@ def _generate_task_py(
         "    load_prompt,",
         "    load_requirements,",
         "    load_support,",
+        "    load_support_binary,",
         "    pytest_grader,",
         "    resolve_env_name,",
         ")",
@@ -607,6 +616,7 @@ def _generate_task_py(
     lines += [
         "        ],",
         '        "support": load_support(__file__),',
+        '        "support_binary": load_support_binary(__file__),',
         '        "hidden_requirements": load_requirements(__file__),',
         "    },",
         ")",
