@@ -90,6 +90,40 @@ class SpecifierExtractionTests(unittest.TestCase):
         self.assertEqual(_bare_package_name("vitest"), "vitest")
         self.assertEqual(_bare_package_name("mongodb/lib"), "mongodb")
 
+    def test_extract_mixed_default_and_named_import(self) -> None:
+        """Regression: `import default, { named } from "./mod"` is the most
+        common TS import shape (e.g. `import React, { useState } from ...`).
+        The pre-fix _IMPORT_RE only matched three clauses (`{ named }`,
+        `identifier`, `* as alias`) — the mixed shape silently dropped the
+        specifier from the closure walker, leaving './mod' unbundled."""
+        code = (
+            "import React, { useState } from './shim';\n"
+            "import helper, { utility } from '../helpers/util';\n"
+        )
+        specs = _extract_all_specifiers(code)
+        self.assertIn("./shim", specs)
+        self.assertIn("../helpers/util", specs)
+
+    def test_extract_dynamic_import(self) -> None:
+        """Regression: `await import('./lazy')` and Promise-style dynamic
+        imports were not in the regex set, so lazy-loaded modules silently
+        dropped from support and the staged tree had broken imports."""
+        code = (
+            "const mod = await import('./lazy');\n"
+            "import('./other').then(m => m.run());\n"
+            "// mention of import('foo') in a code-shaped string\n"
+        )
+        specs = _extract_all_specifiers(code)
+        self.assertIn("./lazy", specs)
+        self.assertIn("./other", specs)
+
+    def test_dynamic_import_does_not_match_static_import_keyword(self) -> None:
+        """Negative-lookbehind sanity check: `import * from "./mod"` should
+        NOT also match the dynamic-import regex (which would double-count)."""
+        code = "import * as X from './static';\n"
+        specs = _extract_all_specifiers(code)
+        self.assertEqual(specs.count("./static"), 1)
+
 
 class LocalSpecifierResolutionTests(unittest.TestCase):
     def test_resolve_exact_file(self) -> None:
@@ -407,6 +441,27 @@ class AuditBareImportsTests(unittest.TestCase):
         pkg = {"name": "my-lib", "devDependencies": {"vitest": "^1.0.0"}}
         issues = audit_bare_imports(m, pkg)
         self.assertEqual(issues, [])
+
+    def test_source_file_undeclared_imports_are_flagged(self) -> None:
+        """Regression: audit only checked test_files + support_files. Source
+        files are visible to the agent and the agent's solution mirrors their
+        bare imports — an undeclared `from 'mongodb'` in src/lib.ts is just
+        as broken at runtime as one in a test, since npm install can't
+        materialize what isn't in package.json."""
+        m = NodeBundleManifest(
+            slug="demo",
+            repo_root="/tmp",
+            source_files={"src/lib.ts": "import { ObjectID } from 'mongodb';"},
+            test_files={},
+            support_files={},
+            config_files={},
+            install_fingerprint="x",
+        )
+        pkg = {"devDependencies": {"vitest": "^1.0.0"}}
+        issues = audit_bare_imports(m, pkg)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("mongodb", issues[0])
+        self.assertIn("src/lib.ts", issues[0])
 
 
 class PathContainmentTests(unittest.TestCase):

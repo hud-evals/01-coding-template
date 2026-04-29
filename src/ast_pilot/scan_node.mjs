@@ -554,7 +554,15 @@ function delimiterDelta(line) {
 function scanSourceFile(filePath) {
   const source = readFileSync(filePath, "utf-8");
   const lines = source.split("\n");
-  const moduleName = basename(filePath).replace(extname(filePath), "");
+  // index.ts (and friends) collapse to the same "index" basename across
+  // every directory, polluting class qualnames in the prompt and overwriting
+  // each other in golden_workspace_validation. Use the containing directory
+  // name instead, mirroring the Python scanner's __init__.py handling.
+  const fileBase = basename(filePath);
+  const isIndexFile = /^index\.(?:ts|tsx|mts|js|mjs|cjs|cts)$/.test(fileBase);
+  const moduleName = isIndexFile
+    ? basename(dirname(filePath))
+    : fileBase.replace(extname(filePath), "");
 
   const functions = [];
   const classes = [];
