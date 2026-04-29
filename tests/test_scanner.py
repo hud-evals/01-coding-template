@@ -78,6 +78,44 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(scanned_names, ["envelope", "pipeline"])
             self.assertEqual(ev.total_loc, 4)
 
+    def test_scan_preserves_dotted_module_names_via_package_tree_fallback(self) -> None:
+        """Regression: when a project has no pyproject.toml/setup.py/.git but DOES
+        have a Python package structure (sibling __init__.py files), the scanner
+        must walk the package tree to find the implicit repo root. Otherwise
+        sources get flat names (`coverage.foo`) and the workspace layout drops
+        the package prefix, breaking test imports like `from src.coverage import ...`.
+        """
+        from ast_pilot.repo_support import find_repo_root, module_name_from_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Simulate Fazlul's ClaimPilot layout: src/ is a package containing
+            # subpackages, no pyproject.toml at the top level.
+            (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            src = root / "src"
+            (src / "coverage").mkdir(parents=True)
+            (src / "ingestion").mkdir(parents=True)
+            (src / "__init__.py").write_text("", encoding="utf-8")
+            (src / "coverage" / "__init__.py").write_text("", encoding="utf-8")
+            (src / "coverage" / "envelope.py").write_text(
+                "def envelope(): return 1\n", encoding="utf-8"
+            )
+            (src / "ingestion" / "__init__.py").write_text("", encoding="utf-8")
+            (src / "ingestion" / "pipeline.py").write_text(
+                "def pipeline(): return 2\n", encoding="utf-8"
+            )
+
+            # repo root should be the project root (parent of src/), not None.
+            detected_root = find_repo_root(src / "coverage" / "envelope.py")
+            self.assertEqual(detected_root, root.resolve())
+
+            # Module name must be fully-dotted with the `src.` prefix.
+            mod = module_name_from_path(src / "coverage" / "envelope.py", detected_root)
+            self.assertEqual(mod, "src.coverage.envelope")
+
+            mod2 = module_name_from_path(src / "ingestion" / "pipeline.py", detected_root)
+            self.assertEqual(mod2, "src.ingestion.pipeline")
+
     def test_scan_walks_test_directory_without_isadirectory_error(self) -> None:
         """Regression: passing a directory as ``--tests`` used to crash with
         ``IsADirectoryError`` because ``_scan_tests`` did ``read_text()`` on it."""

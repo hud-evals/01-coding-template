@@ -1031,7 +1031,13 @@ def _build_target_module_map(
 
     target_map: dict[str, str] = {}
     for module_name, source_path in module_pairs:
-        workspace_rel = module_name.replace(".", "/") + ".py"
+        # __init__.py files map to <pkg>/__init__.py, not <pkg>.py — otherwise
+        # the package import (`from src.coverage import ...`) fails because
+        # `src.py` shadows the `src/` package directory at runtime.
+        if source_path.name == "__init__.py":
+            workspace_rel = module_name.replace(".", "/") + "/__init__.py"
+        else:
+            workspace_rel = module_name.replace(".", "/") + ".py"
         target_map[module_name] = workspace_rel
         rel_path_to_sources.setdefault(workspace_rel, []).append(source_path)
 

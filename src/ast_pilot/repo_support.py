@@ -50,7 +50,21 @@ def find_repo_root(path: str | Path) -> Path | None:
     for parent in (start, *start.parents):
         if any((parent / marker).exists() for marker in PROJECT_MARKERS):
             return parent
-    return None
+    # Fallback: if the source file lives inside a Python package (sibling
+    # __init__.py), walk up until we exit the package tree. The first
+    # ancestor whose parent is *not* a package is the implicit repo root.
+    # Lets us preserve `src.coverage.foo`-style dotted names in projects
+    # that ship only a `requirements.txt` (no pyproject.toml/setup.py/.git).
+    return _find_repo_root_via_package_tree(start)
+
+
+def _find_repo_root_via_package_tree(start: Path) -> Path | None:
+    p = start
+    if not (p / "__init__.py").is_file():
+        return None  # not inside a package, can't infer
+    while p.parent != p and (p.parent / "__init__.py").is_file():
+        p = p.parent
+    return p.parent if p.parent != p else None
 
 
 def find_repo_context(paths: Sequence[str | Path]) -> RepoContext | None:
