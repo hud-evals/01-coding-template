@@ -418,13 +418,27 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
             if original_path is None:
                 continue
 
+            content = original_path.read_text(encoding="utf-8", errors="replace")
+
             if (
                 original_path.name == "__init__.py"
                 and module_name in overlap_packages
             ):
-                continue
+                # The package contains a workspace target. If its __init__.py
+                # is empty, drop it and let the package surface as a PEP 420
+                # namespace pkg so support/<pkg>/ and workspace/<pkg>/ merge
+                # naturally. If it has real code (constants, exports, side
+                # effects), bundle it AND extend __path__ to include the
+                # workspace dir — otherwise turning <pkg> into a regular
+                # package rooted in support/ would hide the agent's
+                # workspace files.
+                if not content.strip():
+                    continue
+                workspace_pkg_dir = WORKSPACE_DIR + "/" + module_name.replace(".", "/")
+                content = (
+                    f"__path__.append({workspace_pkg_dir!r})\n\n" + content
+                )
 
-            content = original_path.read_text(encoding="utf-8", errors="replace")
             relative_path = module_path_from_name(module_name, original_path)
             destination = paths.support_dir / relative_path
             _write(destination, content)
