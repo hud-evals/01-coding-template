@@ -16,7 +16,15 @@ except ImportError:  # pragma: no cover - Python 3.10 fallback
     tomllib = None
 
 
-PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", ".git")
+PROJECT_MARKERS = (
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "requirements.in",
+    "Pipfile",
+    ".git",
+)
 IGNORED_PATH_PARTS = {
     ".git",
     ".hg",
@@ -53,15 +61,14 @@ def find_repo_root(path: str | Path) -> Path | None:
     # Fallback: if the source file lives inside a Python package (sibling
     # __init__.py), walk up until we exit the package tree. The first
     # ancestor whose parent is *not* a package is the implicit repo root.
-    # Lets us preserve `src.coverage.foo`-style dotted names in projects
-    # that ship only a `requirements.txt` (no pyproject.toml/setup.py/.git).
+    # Covers regular-package projects with no marker file at all.
     return _find_repo_root_via_package_tree(start)
 
 
 def _find_repo_root_via_package_tree(start: Path) -> Path | None:
     p = start
     if not (p / "__init__.py").is_file():
-        return None  # not inside a package, can't infer
+        return None  # not inside a regular package, can't infer
     while p.parent != p and (p.parent / "__init__.py").is_file():
         p = p.parent
     return p.parent if p.parent != p else None

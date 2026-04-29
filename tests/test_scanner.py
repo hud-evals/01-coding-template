@@ -219,6 +219,186 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("test_a.py", test_files)
             self.assertIn("test_b.py", test_files)
 
+    def test_find_repo_root_detects_requirements_txt_marker(self) -> None:
+        """Regression: a project shipping only requirements.txt (no pyproject /
+        setup.py / .git) used to land find_repo_root → None, which downstream
+        caused namespace-package layouts (mypkg/foo.py, no __init__.py) to be
+        flattened in the bundled workspace and broke `from mypkg.foo import X`.
+        requirements.txt is now a project marker."""
+        from ast_pilot.repo_support import find_repo_root
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            (root / "mypkg").mkdir()
+            source = root / "mypkg" / "foo.py"
+            source.write_text("def foo(): return 1\n", encoding="utf-8")
+
+            self.assertEqual(find_repo_root(source), root)
+            self.assertEqual(find_repo_root(root / "mypkg"), root)
+
+    def test_find_repo_root_detects_other_python_markers(self) -> None:
+        """Pipfile and requirements.in are also valid project-root signals."""
+        from ast_pilot.repo_support import find_repo_root
+
+        for marker in ("requirements.in", "Pipfile"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir).resolve()
+                (root / marker).write_text("", encoding="utf-8")
+                (root / "pkg").mkdir()
+                source = root / "pkg" / "mod.py"
+                source.write_text("x = 1\n", encoding="utf-8")
+                self.assertEqual(find_repo_root(source), root, msg=marker)
+
+    def test_find_repo_root_returns_none_for_marker_less_namespace_pkg(self) -> None:
+        """Namespace package without ANY project marker remains undetectable —
+        we do NOT walk up into ancestor namespace dirs because that risks
+        misclassifying flat single-file projects (lib.py at project root)
+        as `repo.lib` and breaking flat `from lib import X` test imports."""
+        from ast_pilot.repo_support import find_repo_root
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            # No marker file, no __init__.py anywhere.
+            (root / "mypkg").mkdir()
+            source = root / "mypkg" / "foo.py"
+            source.write_text("def foo(): return 1\n", encoding="utf-8")
+            self.assertIsNone(find_repo_root(source))
+
+    def test_namespace_package_workspace_imports_resolve_end_to_end(self) -> None:
+        """Integration: a project with a PEP 420 namespace package (mypkg/foo.py
+        without mypkg/__init__.py) plus requirements.txt must produce a workspace
+        where `from mypkg.foo import X` resolves at runtime. Before the marker
+        extension, the mypkg/ directory was stripped entirely and the test
+        crashed with ModuleNotFoundError before any implementation check ran."""
+        import subprocess
+
+        from ast_pilot.grader_gen import generate_graders
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "audit_ns"
+            (project / "mypkg").mkdir(parents=True)
+            (project / "tests").mkdir()
+            (project / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            (project / "mypkg" / "foo.py").write_text(
+                "def foo_fn():\n    return 'foo'\n", encoding="utf-8"
+            )
+            (project / "mypkg" / "bar.py").write_text(
+                "def bar_fn():\n    return 'bar'\n", encoding="utf-8"
+            )
+            (project / "tests" / "test_pkg.py").write_text(
+                "from mypkg.foo import foo_fn\n"
+                "from mypkg.bar import bar_fn\n"
+                "def test_foo():\n    assert foo_fn() == 'foo'\n"
+                "def test_bar():\n    assert bar_fn() == 'bar'\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[project / "mypkg"],
+                test_paths=[project / "tests"],
+                project_name="audit-ns",
+            )
+
+            output_dir = project / "_output"
+            generate_graders(
+                ev,
+                output_dir=output_dir,
+                prompt_md="# audit-ns\n",
+                source_paths=[Path(m.path) for m in ev.source_files],
+                test_paths=[Path(t.test_file) for t in ev.tests],
+            )
+
+            golden_root = output_dir / "tasks" / "audit-ns" / "golden"
+            self.assertTrue((golden_root / "mypkg" / "foo.py").is_file())
+            self.assertTrue((golden_root / "mypkg" / "bar.py").is_file())
+            # The bug we're guarding against: golden/foo.py without a mypkg/ prefix
+            self.assertFalse((golden_root / "foo.py").is_file())
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from mypkg.foo import foo_fn\n"
+                    "from mypkg.bar import bar_fn\n"
+                    "assert foo_fn() == 'foo'\n"
+                    "assert bar_fn() == 'bar'\n",
+                ],
+                cwd=golden_root,
+                env={"PYTHONPATH": str(golden_root), "PATH": ""},
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+            )
+
+    def test_regular_package_workspace_imports_resolve_end_to_end(self) -> None:
+        """Integration counterpart for the regular-package case yesterday's fix
+        targeted: src/coverage/__init__.py + src/coverage/envelope.py with
+        relative imports must resolve in the staged workspace."""
+        import subprocess
+
+        from ast_pilot.grader_gen import generate_graders
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "claimsim"
+            (project / "src" / "coverage").mkdir(parents=True)
+            (project / "tests").mkdir()
+            (project / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            (project / "src" / "__init__.py").write_text("", encoding="utf-8")
+            (project / "src" / "coverage" / "__init__.py").write_text(
+                "from .envelope import make_envelope\n", encoding="utf-8"
+            )
+            (project / "src" / "coverage" / "envelope.py").write_text(
+                "def make_envelope(pid):\n    return {'pid': pid}\n", encoding="utf-8"
+            )
+            (project / "tests" / "test_envelope.py").write_text(
+                "from src.coverage import make_envelope\n"
+                "def test_envelope():\n    assert make_envelope(1) == {'pid': 1}\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(
+                source_paths=[project / "src"],
+                test_paths=[project / "tests"],
+                project_name="claimsim",
+            )
+            output_dir = project / "_output"
+            generate_graders(
+                ev,
+                output_dir=output_dir,
+                prompt_md="# claimsim\n",
+                source_paths=[Path(m.path) for m in ev.source_files],
+                test_paths=[Path(t.test_file) for t in ev.tests],
+            )
+
+            golden_root = output_dir / "tasks" / "claimsim" / "golden"
+            self.assertTrue((golden_root / "src" / "coverage" / "__init__.py").is_file())
+            self.assertTrue((golden_root / "src" / "coverage" / "envelope.py").is_file())
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from src.coverage import make_envelope\n"
+                    "assert make_envelope(1) == {'pid': 1}\n",
+                ],
+                cwd=golden_root,
+                env={"PYTHONPATH": str(golden_root), "PATH": ""},
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
