@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,9 @@ WORKSPACE_DIR = "/home/ubuntu/workspace"
 SMALL_TEST_SUPPORT_MAX_LINES = 400
 ALLOW_UNSUPPORTED_TEST_REFS_ENV = "AST_PILOT_ALLOW_UNSUPPORTED_TEST_REFS"
 REPO_ROOT_ENV = "AST_PILOT_REPO_ROOT"
+_WORKSPACE_INSERT_RE = re.compile(
+    r"sys\.path\.insert\s*\(\s*0\s*,\s*['\"]" + re.escape(WORKSPACE_DIR) + r"['\"]"
+)
 _PATH_ANCHOR_NAMES = frozenset({
     "REPO_ROOT", "HERE", "BASE_DIR", "ROOT_DIR", "PROJECT_ROOT",
     "REPO_DIR", "WORKSPACE", "WORKSPACE_DIR", "SRC_ROOT", "SOURCE_ROOT", "ROOT",
@@ -248,12 +252,15 @@ def _collect_small_test_support_modules(
         except SyntaxError:
             continue
 
+        is_package = test_path.name == "__init__.py"
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     candidates.update(resolve_module_candidates(alias.name, repo.module_index))
             elif isinstance(node, ast.ImportFrom):
-                module_name = resolve_from_module(current_module, node.module, node.level)
+                module_name = resolve_from_module(
+                    current_module, node.module, node.level, is_package=is_package
+                )
                 if not module_name:
                     continue
                 candidates.update(resolve_module_candidates(module_name, repo.module_index))
@@ -809,11 +816,14 @@ def _guard_unsupported_test_refs(
     if current_module is None:
         return rewritten_content
 
+    is_package = test_path.name == "__init__.py"
     module_level_refs: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
-        module_level_refs.update(_collect_internal_refs_from_node(node, current_module, repo))
+        module_level_refs.update(
+            _collect_internal_refs_from_node(node, current_module, repo, is_package=is_package)
+        )
 
     unsupported_module_refs = sorted(ref for ref in module_level_refs if ref not in available_modules)
     marks: list[tuple[int, str]] = []
@@ -838,11 +848,15 @@ def _guard_unsupported_test_refs(
             if child.name.startswith("test"):
                 test_methods.append(child)
             else:
-                helper_refs.update(_collect_internal_refs_from_node(child, current_module, repo))
+                helper_refs.update(
+                    _collect_internal_refs_from_node(child, current_module, repo, is_package=is_package)
+                )
 
         unsupported_helpers = {ref for ref in helper_refs if ref not in available_modules}
         for test_method in test_methods:
-            refs = _collect_internal_refs_from_node(test_method, current_module, repo)
+            refs = _collect_internal_refs_from_node(
+                test_method, current_module, repo, is_package=is_package
+            )
             unsupported = sorted((refs | unsupported_helpers) - available_modules)
             if unsupported:
                 marks.append((test_method.lineno, _unsupported_reason(unsupported)))
@@ -857,7 +871,7 @@ def _guard_unsupported_test_refs(
             continue
         if node.lineno in handled_test_lines:
             continue
-        refs = _collect_internal_refs_from_node(node, current_module, repo)
+        refs = _collect_internal_refs_from_node(node, current_module, repo, is_package=is_package)
         unsupported = sorted(ref for ref in refs if ref not in available_modules)
         if unsupported:
             marks.append((node.lineno, _unsupported_reason(unsupported)))
@@ -885,14 +899,22 @@ def _guard_unsupported_test_refs(
     return _insert_function_marks(guarded, marks)
 
 
-def _collect_internal_refs_from_node(node: ast.AST, current_module: str, repo: RepoContext) -> set[str]:
+def _collect_internal_refs_from_node(
+    node: ast.AST,
+    current_module: str,
+    repo: RepoContext,
+    *,
+    is_package: bool = False,
+) -> set[str]:
     refs: set[str] = set()
     for child in ast.walk(node):
         if isinstance(child, ast.Import):
             for alias in child.names:
                 refs.update(resolve_module_candidates(alias.name, repo.module_index))
         elif isinstance(child, ast.ImportFrom):
-            module_name = resolve_from_module(current_module, child.module, child.level)
+            module_name = resolve_from_module(
+                current_module, child.module, child.level, is_package=is_package
+            )
             if not module_name:
                 continue
             refs.update(resolve_module_candidates(module_name, repo.module_index))
@@ -948,7 +970,7 @@ def _prepend_unsupported_test_warning(content: str, failures: list[str]) -> str:
 
 
 def _prepend_workspace_syspath(content: str) -> str:
-    if WORKSPACE_DIR in content and "sys.path.insert" in content:
+    if _WORKSPACE_INSERT_RE.search(content):
         return content
 
     lines = content.splitlines()

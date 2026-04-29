@@ -1346,6 +1346,48 @@ class GraderGenTests(unittest.TestCase):
             f"got order:\n{rewritten}",
         )
 
+    def test_prepend_syspath_skips_existing_workspace_insert_double_quotes(self) -> None:
+        """If the file already has the canonical workspace insert with double
+        quotes, don't prepend a second one."""
+        original = (
+            "import sys\n"
+            f'sys.path.insert(0, "{WORKSPACE_DIR}")\n\n'
+            "from foo import bar\n"
+        )
+        self.assertEqual(_prepend_workspace_syspath(original), original)
+
+    def test_prepend_syspath_skips_existing_workspace_insert_single_quotes(self) -> None:
+        """The dedupe regex must match either quote style."""
+        original = (
+            "import sys\n"
+            f"sys.path.insert(0, '{WORKSPACE_DIR}')\n\n"
+            "from foo import bar\n"
+        )
+        self.assertEqual(_prepend_workspace_syspath(original), original)
+
+    def test_prepend_syspath_overrides_unrelated_insert_with_workspace_in_docstring(self) -> None:
+        """Regression: the previous predicate was a substring check —
+        WORKSPACE_DIR appearing in a docstring AND any sys.path.insert(...) in
+        the file would skip the prepend entirely, leaving the test running
+        without the workspace on sys.path[0]. The dedupe must require the
+        EXACT canonical insert, not just a substring co-occurrence."""
+        original = (
+            f'"""Test workspace at {WORKSPACE_DIR} — note pre-existing path manipulation."""\n'
+            "import sys\n"
+            'sys.path.insert(0, "/tmp/extra")\n\n'
+            "from foo import fn\n"
+            "def test_fn():\n"
+            "    assert fn() == 'foo'\n"
+        )
+        rewritten = _prepend_workspace_syspath(original)
+        self.assertNotEqual(rewritten, original)
+        self.assertIn(f'sys.path.insert(0, "{WORKSPACE_DIR}")', rewritten)
+        # The workspace insert must precede the unrelated insert so it wins
+        # the sys.path[0] slot.
+        ws_idx = rewritten.index(f'"{WORKSPACE_DIR}"')
+        other_idx = rewritten.index('"/tmp/extra"')
+        self.assertLess(ws_idx, other_idx)
+
     def test_detect_cross_module_path_access_flags_parents_subscript(self) -> None:
         source = textwrap.dedent(
             """

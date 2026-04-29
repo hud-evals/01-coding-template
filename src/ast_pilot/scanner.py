@@ -176,7 +176,7 @@ def _scan_module(path: Path) -> ModuleInfo | None:
     lines = source.splitlines()
     mod = ModuleInfo(
         path=str(path),
-        module_name=path.stem,
+        module_name=path.parent.name if path.name == "__init__.py" else path.stem,
         line_count=len(lines),
         docstring=ast.get_docstring(tree) or "",
     )

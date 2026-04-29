@@ -219,6 +219,63 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("test_a.py", test_files)
             self.assertIn("test_b.py", test_files)
 
+    def test_scan_uses_directory_name_for_init_py_modules(self) -> None:
+        """Regression: __init__.py used to surface as module_name='__init__',
+        which polluted class qualnames in the prompt (e.g. '__init__.MyClass'
+        instead of 'mypkg.MyClass') and the own_modules set used in third-party
+        dependency classification. Scanner now uses the containing directory."""
+        from ast_pilot.scanner import _scan_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pkg = Path(tmpdir) / "mypkg"
+            pkg.mkdir()
+            init = pkg / "__init__.py"
+            init.write_text(
+                "class MyClass:\n    def m(self): return 1\n\n"
+                "def helper(): return 2\n",
+                encoding="utf-8",
+            )
+            mod = _scan_module(init)
+            assert mod is not None
+            self.assertEqual(mod.module_name, "mypkg")
+            qualnames = sorted(c.qualname for c in mod.classes)
+            self.assertEqual(qualnames, ["mypkg.MyClass"])
+            fn_qualnames = sorted(f.qualname for f in mod.functions)
+            self.assertEqual(fn_qualnames, ["mypkg.helper"])
+
+    def test_init_py_test_file_resolves_relative_imports_via_is_package(self) -> None:
+        """Regression: tests/__init__.py with `from ..pkg.helper import X` used
+        to over-strip a segment in resolve_from_module because the call site in
+        _collect_internal_refs_from_node didn't pass is_package=True. Verifies
+        the test-side call sites (grader_gen.py:_collect_small_test_support_modules
+        and _collect_internal_refs_from_node) thread the flag properly."""
+        from ast_pilot.grader_gen import _collect_small_test_support_modules
+        from ast_pilot.repo_support import find_repo_context
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            (root / "mypkg").mkdir()
+            (root / "mypkg" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "mypkg" / "helper.py").write_text(
+                "def helper():\n    return 1\n", encoding="utf-8"
+            )
+            (root / "tests").mkdir()
+            tests_init = root / "tests" / "__init__.py"
+            tests_init.write_text(
+                "from ..mypkg.helper import helper\n", encoding="utf-8"
+            )
+
+            repo = find_repo_context([tests_init])
+            assert repo is not None
+            supported = _collect_small_test_support_modules(
+                (tests_init,),
+                repo,
+                target_modules=set(),
+            )
+            # mypkg.helper must be picked up via the relative import in tests/__init__.py.
+            self.assertIn("mypkg.helper", supported)
+
     def test_find_repo_root_detects_requirements_txt_marker(self) -> None:
         """Regression: a project shipping only requirements.txt (no pyproject /
         setup.py / .git) used to land find_repo_root → None, which downstream
