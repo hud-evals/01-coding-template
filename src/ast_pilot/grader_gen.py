@@ -410,6 +410,7 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
             source_ctx.target_module_map,
             repo.module_index,
         )
+        bundled_module_names = modules_to_copy | set(source_ctx.target_module_map)
 
         # Target modules are written at their real workspace path by the
         # agent, not via a shim under support/, so we skip them here.
@@ -424,15 +425,24 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
                 original_path.name == "__init__.py"
                 and module_name in overlap_packages
             ):
-                # The package contains a workspace target. If its __init__.py
-                # is empty, drop it and let the package surface as a PEP 420
-                # namespace pkg so support/<pkg>/ and workspace/<pkg>/ merge
-                # naturally. If it has real code (constants, exports, side
-                # effects), bundle it AND extend __path__ to include the
-                # workspace dir — otherwise turning <pkg> into a regular
-                # package rooted in support/ would hide the agent's
-                # workspace files.
+                # The package contains a workspace target. Three cases:
+                #   1. Empty / docstring-only __init__.py: drop it so the
+                #      package surfaces as a PEP 420 namespace pkg and
+                #      support/<pkg>/ + workspace/<pkg>/ merge naturally.
+                #   2. Real code (constants, exports) AND every relative /
+                #      sibling import resolves to something we're bundling:
+                #      ship it, prepended with __path__.append(<workspace>)
+                #      so workspace files merge into the same package.
+                #   3. Real code BUT some imports reference siblings we
+                #      aren't bundling (the package's `__init__.py` re-
+                #      exports unrelated submodules): fall back to (1) —
+                #      bundling would crash at import time on the broken
+                #      `from .X import Y`.
                 if not content.strip():
+                    continue
+                if not _init_py_imports_resolve(
+                    content, module_name, bundled_module_names
+                ):
                     continue
                 workspace_pkg_dir = WORKSPACE_DIR + "/" + module_name.replace(".", "/")
                 content = (
@@ -467,6 +477,36 @@ def _write_support_files(paths: TaskPaths, source_ctx: SourceContext) -> dict[st
         files[f"tasks/{paths.slug}/support/{rel_path}"] = content
 
     return files
+
+
+def _init_py_imports_resolve(
+    content: str,
+    module_name: str,
+    available: set[str],
+) -> bool:
+    """True iff every package-relative import in ``content`` resolves to a
+    bundled module. Used to decide whether a re-exporting __init__.py can
+    be safely shipped under support/."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level > 0:
+            target = resolve_from_module(
+                module_name, node.module, node.level, is_package=True
+            )
+        elif node.module and (
+            node.module == module_name or node.module.startswith(module_name + ".")
+        ):
+            target = node.module
+        else:
+            continue
+        if target and target not in available:
+            return False
+    return True
 
 
 def _packages_overlapping_with_targets(
