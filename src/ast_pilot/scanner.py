@@ -104,7 +104,10 @@ def _annotate_module_with_repo_context(mod: ModuleInfo, repo) -> None:
         )
         if dotted:
             mod.dotted_module_name = dotted
-            mod.workspace_rel_path = dotted.replace(".", "/") + ".py"
+            if path.name == "__init__.py":
+                mod.workspace_rel_path = dotted.replace(".", "/") + "/__init__.py"
+            else:
+                mod.workspace_rel_path = dotted.replace(".", "/") + ".py"
             return
     mod.dotted_module_name = mod.module_name
     mod.workspace_rel_path = path.name

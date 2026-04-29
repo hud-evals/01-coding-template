@@ -219,6 +219,56 @@ class ScannerTests(unittest.TestCase):
             self.assertIn("test_a.py", test_files)
             self.assertIn("test_b.py", test_files)
 
+    def test_workspace_rel_path_for_init_py_uses_pkg_init_path(self) -> None:
+        """Regression: an __init__.py source used to surface as
+        workspace_rel_path = 'mypkg.py' (because the dotted name has __init__
+        stripped, and the path computation tacked on '.py'). The prompt then
+        instructed the agent to create 'mypkg.py', shadowing the staged
+        'mypkg/__init__.py' package directory at runtime. workspace_rel_path
+        for an __init__.py source must end in /__init__.py, mirroring the
+        target_module_map fix in 115faa6."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+            (root / "mypkg").mkdir()
+            init = root / "mypkg" / "__init__.py"
+            init.write_text("class Helper: ...\n", encoding="utf-8")
+            (root / "mypkg" / "foo.py").write_text(
+                "def foo(): return 1\n", encoding="utf-8"
+            )
+
+            ev = scan(source_paths=[root / "mypkg"], project_name="t")
+            init_mod = next(m for m in ev.source_files if Path(m.path).name == "__init__.py")
+            foo_mod = next(m for m in ev.source_files if Path(m.path).name == "foo.py")
+            self.assertEqual(init_mod.workspace_rel_path, "mypkg/__init__.py")
+            self.assertEqual(foo_mod.workspace_rel_path, "mypkg/foo.py")
+
+    def test_pyproject_package_dir_underscore_form_is_honored(self) -> None:
+        """Regression: _collect_configured_import_roots only read the hyphen
+        form `package-dir`. Modern setuptools (and tools like pdm/uv) write
+        the underscore form `package_dir`. A non-default source layout
+        (e.g. `srcs/` instead of `src/`) under the underscore key was
+        silently ignored, leading to bundles at golden/srcs/mypkg/foo.py
+        instead of golden/mypkg/foo.py."""
+        from ast_pilot.repo_support import _discover_import_roots_cached, discover_import_roots
+
+        _discover_import_roots_cached.cache_clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / "pyproject.toml").write_text(
+                textwrap.dedent('''
+                    [project]
+                    name = "x"
+                    version = "0"
+                    [tool.setuptools]
+                    package_dir = {"" = "srcs"}
+                ''').strip() + "\n",
+                encoding="utf-8",
+            )
+            (root / "srcs").mkdir()
+            roots = discover_import_roots(root)
+            self.assertIn(root / "srcs", [r.resolve() for r in roots])
+
     def test_scan_uses_directory_name_for_init_py_modules(self) -> None:
         """Regression: __init__.py used to surface as module_name='__init__',
         which polluted class qualnames in the prompt (e.g. '__init__.MyClass'

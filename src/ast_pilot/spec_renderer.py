@@ -362,7 +362,9 @@ def _collect_internal_dependency_references(
         if not source_path.exists():
             continue
 
-        current_module = module_name_from_path(source_path, repo.root)
+        current_module = module_name_from_path(
+            source_path, repo.root, import_roots=repo.import_roots
+        )
         if current_module is None:
             continue
 
@@ -434,7 +436,7 @@ def _workspace_target_files(ev: Evidence) -> list[str]:
     seen: set[str] = set()
     for mod in ev.source_files:
         rel = mod.workspace_rel_path or Path(mod.path).name
-        if not rel or rel in seen or Path(rel).name == "__init__.py":
+        if not rel or rel in seen:
             continue
         seen.add(rel)
         files.append(rel)

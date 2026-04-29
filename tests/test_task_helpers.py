@@ -80,6 +80,28 @@ class LoadSupportTests(unittest.TestCase):
             payload = load_support(str(task_dir / "task.py"))
             self.assertEqual(json.loads(json.dumps(payload)), payload)
 
+    def test_walk_tree_skips_binary_files_instead_of_crashing(self) -> None:
+        """Regression: _walk_tree used strict UTF-8 read on every file under
+        support/, so a stray .pyc / image / pickle would raise
+        UnicodeDecodeError at task import time and abort loading the entire
+        task. Defensively skip files that aren't valid UTF-8."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            task_dir.mkdir()
+            support = task_dir / "support"
+            support.mkdir()
+            (support / "good.py").write_text("def fn(): pass\n", encoding="utf-8")
+            # Real PNG-ish header — invalid UTF-8 (0x89 is a continuation byte).
+            (support / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            # Stray .pyc-shaped binary inside a __pycache__/ subdir
+            (support / "__pycache__").mkdir()
+            (support / "__pycache__" / "good.cpython-312.pyc").write_bytes(
+                b"\xcb\r\r\n\x00\x00\x00\x00"
+            )
+            payload = load_support(str(task_dir / "task.py"))
+            self.assertEqual(set(payload), {"good.py"})
+            self.assertEqual(payload["good.py"], "def fn(): pass\n")
+
 
 class LoadGoldenTests(unittest.TestCase):
     def test_reads_golden_tree_same_shape_as_support(self) -> None:

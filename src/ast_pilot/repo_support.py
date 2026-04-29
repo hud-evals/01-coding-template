@@ -204,7 +204,9 @@ def _collect_configured_import_roots(root: Path, data: dict, add_root) -> None:
     tool = data.get("tool", {})
 
     setuptools = tool.get("setuptools", {})
-    package_dir = setuptools.get("package-dir", {})
+    # Modern setuptools / pdm tooling writes the underscore form;
+    # legacy docs use the hyphen form. Read either.
+    package_dir = setuptools.get("package_dir") or setuptools.get("package-dir") or {}
     if isinstance(package_dir, dict):
         for value in package_dir.values():
             if isinstance(value, str) and value:

@@ -232,5 +232,11 @@ def _walk_tree(root: Path) -> dict[str, str]:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        result[rel] = path.read_text(encoding="utf-8")
+        try:
+            result[rel] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Stray binary (a leftover .pyc, a vendor image asset etc.) —
+            # the bundler's text contract doesn't carry it; skip rather
+            # than abort task import for the whole bundle.
+            continue
     return result
