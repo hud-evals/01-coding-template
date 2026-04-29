@@ -14,6 +14,7 @@ Two scenarios are registered:
   only requires ``hud sync`` — no image rebuild.
 """
 
+import base64
 import hashlib
 import logging
 import os
@@ -124,17 +125,29 @@ NODE_STAGING_ROOT = Path("/tmp/ast_pilot_ts_stage")
 NODE_MODULES_CACHE_ROOT = Path("/tmp/ast_pilot_node_modules")
 
 
-def _stage_support(support: dict[str, str] | None) -> None:
-    """Write each inlined support file to /opt/task_support/ and add to sys.path."""
-    if not support:
+def _stage_support(
+    support: dict[str, str] | None,
+    support_binary: dict[str, str] | None = None,
+) -> None:
+    """Write each inlined support file to /opt/task_support/ and add to sys.path.
+
+    ``support`` carries text files; ``support_binary`` carries base64-encoded
+    bytes for non-UTF-8 assets (sqlite databases, images, pickles). Both are
+    optional — older tasks predating the binary path emit only ``support``.
+    """
+    if not support and not support_binary:
         return
     if SUPPORT_STAGING_ROOT.exists():
         shutil.rmtree(SUPPORT_STAGING_ROOT)
     SUPPORT_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
-    for rel, content in support.items():
+    for rel, content in (support or {}).items():
         dst = SUPPORT_STAGING_ROOT / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(content, encoding="utf-8")
+    for rel, encoded in (support_binary or {}).items():
+        dst = SUPPORT_STAGING_ROOT / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(base64.b64decode(encoded))
     root_str = str(SUPPORT_STAGING_ROOT)
     if root_str not in sys.path:
         sys.path.append(root_str)
@@ -318,6 +331,7 @@ async def coding_task_v2(
     prompt: str,
     graders: list[dict[str, Any]] | None = None,
     support: dict[str, str] | None = None,
+    support_binary: dict[str, str] | None = None,
     hidden_requirements: str | None = None,
     node_project: dict[str, Any] | None = None,
 ):
@@ -353,7 +367,7 @@ async def coding_task_v2(
 
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-    _stage_support(support)
+    _stage_support(support, support_binary)
     requirements_path = _write_requirements_file(hidden_requirements)
     node_staging, node_sources, node_cache = _stage_node_project(node_project)
 

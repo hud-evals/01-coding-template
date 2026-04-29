@@ -18,10 +18,19 @@ NODE_IMPORT_EXTENSIONS = (".ts", ".mts", ".js", ".mjs", ".json", ".cjs", ".cts")
 _IMPORT_RE = re.compile(
     r"""(?:^|\n)\s*import\s+"""
     r"""(?:type\s+)?"""
-    r"""(?:\{[^}]*\}\s+from|[\w*]+\s+from|\*\s+as\s+\w+\s+from)"""
+    r"""(?:"""
+    r"""\{[^}]*\}\s+from"""                 # { named } from
+    r"""|[\w$]+\s*,\s*\{[^}]*\}\s+from"""   # default, { named } from
+    r"""|[\w$]+\s*,\s*\*\s+as\s+\w+\s+from"""  # default, * as alias from
+    r"""|[\w*$]+\s+from"""                  # default | * from
+    r"""|\*\s+as\s+\w+\s+from"""            # * as alias from
+    r""")"""
     r"""\s+['"]([^'"]+)['"]"""
 )
 _SIDE_EFFECT_IMPORT_RE = re.compile(r"""(?:^|\n)\s*import\s+['"]([^'"]+)['"]""")
+_DYNAMIC_IMPORT_RE = re.compile(
+    r"""(?<![A-Za-z0-9_$])import\s*\(\s*['"]([^'"]+)['"]"""
+)
 _REQUIRE_RE = re.compile(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""")
 _EXPORT_FROM_RE = re.compile(
     r"""(?:^|\n)\s*export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]"""
@@ -155,7 +164,15 @@ def audit_bare_imports(
         all_deps.add(pkg_name)
 
     issues: list[str] = []
-    hidden_files = {**manifest.test_files, **manifest.support_files}
+    # Source files are visible to the agent and the agent's solution will
+    # mirror their bare imports. An undeclared `import 'mongodb'` in
+    # src/lib.ts is just as broken as one in a hidden test — npm install
+    # can't materialize what isn't in package.json.
+    hidden_files = {
+        **manifest.test_files,
+        **manifest.support_files,
+        **manifest.source_files,
+    }
 
     for rel_path, content in hidden_files.items():
         for specifier in _extract_all_specifiers(content):
@@ -246,7 +263,13 @@ def _extract_local_specifiers(content: str) -> list[str]:
 def _extract_all_specifiers(content: str) -> list[str]:
     """Extract all import/require specifiers from TypeScript/JavaScript source."""
     specifiers: list[str] = []
-    for pattern in (_IMPORT_RE, _SIDE_EFFECT_IMPORT_RE, _REQUIRE_RE, _EXPORT_FROM_RE):
+    for pattern in (
+        _IMPORT_RE,
+        _SIDE_EFFECT_IMPORT_RE,
+        _DYNAMIC_IMPORT_RE,
+        _REQUIRE_RE,
+        _EXPORT_FROM_RE,
+    ):
         for m in pattern.finditer(content):
             specifiers.append(m.group(1))
     return specifiers

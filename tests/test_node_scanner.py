@@ -167,6 +167,62 @@ class NodeScannerTests(unittest.TestCase):
                 {"defaultInstance", "serialize"},
             )
 
+    def test_index_ts_module_name_uses_parent_directory(self) -> None:
+        """Regression: scan_node.mjs set module_name = basename minus extension,
+        so every `index.ts` collapsed to "index" — class qualnames at
+        src/index.ts and src/utils/index.ts both ended up as "index.SomeClass".
+        That polluted the prompt's directory tree, broke per-file dedupe in
+        spec rendering, and silently overwrote one staging path with another
+        in golden_workspace_validation. Use the containing directory name
+        instead, mirroring the Python __init__.py fix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_repo(root)
+
+            (root / "src" / "index.ts").write_text(
+                "export class MainEntry { run(): string { return 'main'; } }\n",
+                encoding="utf-8",
+            )
+            (root / "src" / "utils").mkdir()
+            (root / "src" / "utils" / "index.ts").write_text(
+                "export class UtilHelper { go(): string { return 'util'; } }\n",
+                encoding="utf-8",
+            )
+            test_path = root / "tests" / "api.test.ts"
+            test_path.write_text(
+                'import { MainEntry } from "../src/index.ts";\n'
+                'import { UtilHelper } from "../src/utils/index.ts";\n'
+                'import { describe, it, expect } from "vitest";\n'
+                'describe("x", () => { it("y", () => { '
+                'expect(new MainEntry().run()).toBe("main"); '
+                'expect(new UtilHelper().go()).toBe("util"); '
+                "}); });\n",
+                encoding="utf-8",
+            )
+
+            ev = scan_typescript(
+                source_paths=[
+                    root / "src" / "index.ts",
+                    root / "src" / "utils" / "index.ts",
+                ],
+                test_paths=[test_path],
+                project_name="demo",
+            )
+
+            modules = {Path(mod.path).name: mod for mod in ev.source_files}
+            top_index = next(mod for mod in ev.source_files
+                              if mod.path.endswith("/src/index.ts"))
+            sub_index = next(mod for mod in ev.source_files
+                              if mod.path.endswith("/src/utils/index.ts"))
+            # module_name must reflect the containing directory.
+            self.assertEqual(top_index.module_name, "src")
+            self.assertEqual(sub_index.module_name, "utils")
+            # Class qualnames carry that prefix instead of the literal "index".
+            top_class = next(c for c in top_index.classes if c.name == "MainEntry")
+            sub_class = next(c for c in sub_index.classes if c.name == "UtilHelper")
+            self.assertEqual(top_class.qualname, "src.MainEntry")
+            self.assertEqual(sub_class.qualname, "utils.UtilHelper")
+
     def test_scan_typescript_does_not_create_lockfile_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

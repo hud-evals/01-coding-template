@@ -255,7 +255,10 @@ class GraderGenTests(unittest.TestCase):
             self.assertEqual(module.task.scenario, "ast-pilot:coding-task-v2")
 
             args = module.task.args
-            self.assertEqual(sorted(args.keys()), ["graders", "hidden_requirements", "prompt", "support"])
+            self.assertEqual(
+                sorted(args.keys()),
+                ["graders", "hidden_requirements", "prompt", "support", "support_binary"],
+            )
             self.assertIn("# target-task", args["prompt"])
             self.assertEqual(len(args["graders"]), 1)
             grader = args["graders"][0]
@@ -1345,6 +1348,159 @@ class GraderGenTests(unittest.TestCase):
             "import sys must be bound before sys.path.insert runs; "
             f"got order:\n{rewritten}",
         )
+
+    def test_overlap_package_init_with_real_code_is_bundled_with_path_extension(self) -> None:
+        """Regression: an overlap-package __init__.py with real module-level
+        code (constants, exports, side-effect imports) used to be dropped
+        wholesale, breaking transitive `from pkg import CONSTANT` imports
+        from support modules. Now we bundle it with a __path__.append(...)
+        preamble so the workspace's pkg/<target>.py is still merged into
+        the package.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "src-pkg"\nversion = "0.1.0"\n', encoding="utf-8"
+            )
+            src_pkg = root / "src"
+            src_pkg.mkdir()
+            (src_pkg / "__init__.py").write_text(
+                '"""Top-level package init with a real constant."""\n'
+                'SRC_VERSION = "1.2.3"\n',
+                encoding="utf-8",
+            )
+            utils_pkg = src_pkg / "utils"
+            utils_pkg.mkdir()
+            (utils_pkg / "__init__.py").write_text(
+                "from src import SRC_VERSION\n"
+                "def helper(): return f'helper@{SRC_VERSION}'\n",
+                encoding="utf-8",
+            )
+            cov_pkg = src_pkg / "coverage"
+            cov_pkg.mkdir()
+            target = cov_pkg / "__init__.py"
+            target.write_text(
+                "from src.utils import helper\n"
+                "def coverage_fn(): return f'coverage/{helper()}'\n",
+                encoding="utf-8",
+            )
+            tests = root / "tests"
+            tests.mkdir()
+            test_file = tests / "test_cov.py"
+            test_file.write_text(
+                "from src.coverage import coverage_fn\n"
+                "def test(): assert coverage_fn() == 'coverage/helper@1.2.3'\n",
+                encoding="utf-8",
+            )
+
+            ev = scan(source_paths=[target], test_paths=[test_file], project_name="src-pkg")
+            out_dir = root / "out"
+            files = generate_graders(
+                ev,
+                output_dir=out_dir,
+                prompt_md="# src-pkg\n",
+                source_paths=[target],
+                test_paths=[test_file],
+            )
+
+            self.assertIn("tasks/src-pkg/support/src/__init__.py", files)
+            bundled_init = files["tasks/src-pkg/support/src/__init__.py"]
+            # Original constant must survive bundling.
+            self.assertIn('SRC_VERSION = "1.2.3"', bundled_init)
+            # __path__ extension must allow the workspace pkg dir to merge.
+            self.assertIn(
+                f"__path__.append('{WORKSPACE_DIR}/src')",
+                bundled_init,
+            )
+
+            # End-to-end: stage golden + support into a fake workspace and
+            # confirm the import chain actually resolves at runtime.
+            import subprocess
+            workspace = root / "_workspace"
+            workspace.mkdir()
+            for path in (out_dir / "tasks" / "src-pkg" / "golden").rglob("*"):
+                if path.is_file():
+                    rel = path.relative_to(out_dir / "tasks" / "src-pkg" / "golden")
+                    dest = workspace / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(path.read_bytes())
+            support_root = out_dir / "tasks" / "src-pkg" / "support"
+            for path in support_root.rglob("*"):
+                if path.is_file():
+                    rel = path.relative_to(support_root)
+                    dest = workspace / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(path.read_bytes())
+            # Rewrite the WORKSPACE_DIR placeholder in bundled __init__ to
+            # point at our test workspace, since the test isn't running at
+            # /home/ubuntu/workspace.
+            for init_path in workspace.rglob("__init__.py"):
+                txt = init_path.read_text(encoding="utf-8")
+                if WORKSPACE_DIR in txt:
+                    init_path.write_text(
+                        txt.replace(WORKSPACE_DIR, str(workspace)),
+                        encoding="utf-8",
+                    )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from src.coverage import coverage_fn\n"
+                    "assert coverage_fn() == 'coverage/helper@1.2.3'\n",
+                ],
+                cwd=workspace,
+                env={"PYTHONPATH": str(workspace), "PATH": ""},
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+            )
+
+    def test_prepend_syspath_skips_existing_workspace_insert_double_quotes(self) -> None:
+        """If the file already has the canonical workspace insert with double
+        quotes, don't prepend a second one."""
+        original = (
+            "import sys\n"
+            f'sys.path.insert(0, "{WORKSPACE_DIR}")\n\n'
+            "from foo import bar\n"
+        )
+        self.assertEqual(_prepend_workspace_syspath(original), original)
+
+    def test_prepend_syspath_skips_existing_workspace_insert_single_quotes(self) -> None:
+        """The dedupe regex must match either quote style."""
+        original = (
+            "import sys\n"
+            f"sys.path.insert(0, '{WORKSPACE_DIR}')\n\n"
+            "from foo import bar\n"
+        )
+        self.assertEqual(_prepend_workspace_syspath(original), original)
+
+    def test_prepend_syspath_overrides_unrelated_insert_with_workspace_in_docstring(self) -> None:
+        """Regression: the previous predicate was a substring check —
+        WORKSPACE_DIR appearing in a docstring AND any sys.path.insert(...) in
+        the file would skip the prepend entirely, leaving the test running
+        without the workspace on sys.path[0]. The dedupe must require the
+        EXACT canonical insert, not just a substring co-occurrence."""
+        original = (
+            f'"""Test workspace at {WORKSPACE_DIR} — note pre-existing path manipulation."""\n'
+            "import sys\n"
+            'sys.path.insert(0, "/tmp/extra")\n\n'
+            "from foo import fn\n"
+            "def test_fn():\n"
+            "    assert fn() == 'foo'\n"
+        )
+        rewritten = _prepend_workspace_syspath(original)
+        self.assertNotEqual(rewritten, original)
+        self.assertIn(f'sys.path.insert(0, "{WORKSPACE_DIR}")', rewritten)
+        # The workspace insert must precede the unrelated insert so it wins
+        # the sys.path[0] slot.
+        ws_idx = rewritten.index(f'"{WORKSPACE_DIR}"')
+        other_idx = rewritten.index('"/tmp/extra"')
+        self.assertLess(ws_idx, other_idx)
 
     def test_detect_cross_module_path_access_flags_parents_subscript(self) -> None:
         source = textwrap.dedent(
