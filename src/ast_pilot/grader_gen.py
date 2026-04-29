@@ -348,11 +348,14 @@ def _rewrite_source_relative_imports(
 
     rewrites: list[tuple[int, int, str]] = []
     lines = content.splitlines(keepends=True)
+    is_package = source_path.name == "__init__.py"
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.level == 0:
             continue
-        target = resolve_from_module(current_module, node.module, node.level)
+        target = resolve_from_module(
+            current_module, node.module, node.level, is_package=is_package
+        )
         if not target:
             continue
 

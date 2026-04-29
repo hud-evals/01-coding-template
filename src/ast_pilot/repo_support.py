@@ -245,13 +245,16 @@ def collect_internal_imports(path: str | Path, ctx: RepoContext) -> set[str]:
     except SyntaxError:
         return set()
 
+    is_package = source_path.name == "__init__.py"
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 found.update(resolve_module_candidates(alias.name, ctx.module_index))
         elif isinstance(node, ast.ImportFrom):
-            module_name = resolve_from_module(current_module, node.module, node.level)
+            module_name = resolve_from_module(
+                current_module, node.module, node.level, is_package=is_package
+            )
             if not module_name:
                 continue
             found.update(resolve_module_candidates(module_name, ctx.module_index))
@@ -282,11 +285,26 @@ def resolve_module_candidates(module_name: str, module_index: dict[str, Path]) -
     return candidates
 
 
-def resolve_from_module(current_module: str, module_name: str | None, level: int) -> str | None:
+def resolve_from_module(
+    current_module: str,
+    module_name: str | None,
+    level: int,
+    *,
+    is_package: bool = False,
+) -> str | None:
     if level == 0:
         return module_name
 
-    package_parts = current_module.split(".")[:-1]
+    # An __init__.py file's `current_module` IS the package (e.g. "src.coverage"
+    # for src/coverage/__init__.py). For regular modules, current_module names
+    # a module *inside* a package (e.g. "src.coverage.foo"); the package is the
+    # parent. Without this distinction, level=1 from an __init__.py incorrectly
+    # walks one segment too far up and `from .X import Y` becomes
+    # `src.X` instead of `src.coverage.X`.
+    if is_package:
+        package_parts = current_module.split(".")
+    else:
+        package_parts = current_module.split(".")[:-1]
     if level - 1 > len(package_parts):
         return module_name
 

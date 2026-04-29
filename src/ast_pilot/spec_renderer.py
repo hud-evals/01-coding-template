@@ -371,6 +371,7 @@ def _collect_internal_dependency_references(
         except SyntaxError:
             continue
 
+        is_package = source_path.name == "__init__.py"
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -382,7 +383,9 @@ def _collect_internal_dependency_references(
                         continue
                     refs.setdefault(chosen, set())
             elif isinstance(node, ast.ImportFrom):
-                module_name = resolve_from_module(current_module, node.module, node.level)
+                module_name = resolve_from_module(
+                    current_module, node.module, node.level, is_package=is_package
+                )
                 if not module_name:
                     continue
                 candidates = resolve_module_candidates(module_name, repo.module_index)
