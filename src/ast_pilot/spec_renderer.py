@@ -804,6 +804,28 @@ def _build_test_facts(ev: Evidence) -> str:
 # ---------------------------------------------------------------------------
 
 
+_LLM_SECTIONS_SUCCEEDED: list[bool] = []
+
+
 def _call_llm(prompt: str, max_tokens: int = 16384) -> str | None:
-    """Call the configured LLM for a single section draft."""
-    return call_text_llm(prompt, max_tokens=max_tokens)
+    """Call the configured LLM for a single section draft.
+
+    Records whether the call produced output so callers can detect a silent
+    degradation: without an API key (or on any client failure) every section
+    falls back to deterministic prose — byte-identical to ``--no-llm`` — and
+    a user must be told the LLM never ran rather than shipping prose they
+    believe was model-authored.
+    """
+    result = call_text_llm(prompt, max_tokens=max_tokens)
+    _LLM_SECTIONS_SUCCEEDED.append(result is not None)
+    return result
+
+
+def llm_sections_used() -> bool:
+    """True when at least one LLM section produced real model output this run."""
+    return any(_LLM_SECTIONS_SUCCEEDED)
+
+
+def reset_llm_sections_tracking() -> None:
+    """Clear the per-run tracking before rendering a new prompt."""
+    _LLM_SECTIONS_SUCCEEDED.clear()
