@@ -535,3 +535,27 @@ class CliAlignmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_spec_warns_when_llm_requested_but_fallback_rendered() -> None:
+    """No API key => every LLM section falls back silently; the CLI must say
+    so instead of emitting a byte-identical-looking deterministic spec."""
+    import argparse
+
+    from ast_pilot.cli import cmd_spec
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_path = root / "spec-out"
+        args = argparse.Namespace(evidence=None, output=str(out_path), no_llm=False)
+
+        with (
+            patch("ast_pilot.evidence.Evidence.load") as load,
+            patch("ast_pilot.spec_renderer.render_start_md", return_value="# fallback\n") as render,
+            patch("ast_pilot.spec_renderer.llm_sections_used", return_value=False) as used,
+        ):
+            cmd_spec(args)
+
+        load.assert_called_once()
+        render.assert_called_once()
+        used.assert_called_once()
