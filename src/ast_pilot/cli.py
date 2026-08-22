@@ -89,12 +89,22 @@ def cmd_spec(args: argparse.Namespace) -> None:
     if ev.language == "typescript":
         from .node_spec_renderer import render_start_md
     else:
-        from .spec_renderer import render_start_md
+        from .spec_renderer import llm_sections_used, render_start_md, reset_llm_sections_tracking
 
+    reset_llm_sections_tracking()
     md = render_start_md(ev, output_path=out, use_llm=use_llm)
     print(f"Generated {len(md)} chars -> {out}")
     if not use_llm:
         print("  (LLM disabled, used deterministic fallback)")
+    elif not llm_sections_used():
+        # The LLM was requested but every section silently fell back: no API
+        # key configured, or the client failed on every call. The output is
+        # byte-identical to --no-llm, so say so loudly instead of letting the
+        # user ship prose they believe the model authored.
+        print(
+            "  WARNING: LLM requested but no section used model output — "
+            "rendered deterministic fallback. Check AST_PILOT_MODEL / API key."
+        )
 
 
 def cmd_bundle(args: argparse.Namespace) -> None:
